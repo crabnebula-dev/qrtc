@@ -19,3 +19,6 @@ tests and docs are dropped and their targets removed from the manifest).
    built with RustCrypto (`p256`, `x509-cert`) instead of dimpl's `rcgen`
    feature. That feature enabled `aws-lc-rs`, compiling AWS-LC (C) into an
    otherwise pure Rust stack.
+
+4. Dev-dependencies are removed from both vendored manifests (their tests are
+   not vendored), so SBOMs list only what is built.
