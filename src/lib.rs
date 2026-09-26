@@ -63,7 +63,9 @@ pub struct IceServer {
     pub credential: Option<String>,
 }
 
-fn one_or_many<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Vec<String>, D::Error> {
+fn one_or_many<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Vec<String>, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum OneOrMany {
@@ -274,7 +276,11 @@ impl CodecName {
         })
     }
     pub fn kind(self) -> TrackKind {
-        if self == CodecName::Opus { TrackKind::Audio } else { TrackKind::Video }
+        if self == CodecName::Opus {
+            TrackKind::Audio
+        } else {
+            TrackKind::Video
+        }
     }
 }
 
@@ -301,36 +307,73 @@ pub enum Payload {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum PeerEvent {
     /// A local candidate; `None` signals end of candidates.
-    IceCandidate { candidate: Option<IceCandidate> },
-    IceGatheringStateChange { state: String },
-    IceConnectionStateChange { state: String },
-    ConnectionStateChange { state: String },
-    SignalingStateChange { state: String },
+    IceCandidate {
+        candidate: Option<IceCandidate>,
+    },
+    IceGatheringStateChange {
+        state: String,
+    },
+    IceConnectionStateChange {
+        state: String,
+    },
+    ConnectionStateChange {
+        state: String,
+    },
+    SignalingStateChange {
+        state: String,
+    },
     NegotiationNeeded,
     /// Remote peer opened a data channel.
-    DataChannel { channel: DataChannelInfo },
+    DataChannel {
+        channel: DataChannelInfo,
+    },
     #[serde(rename = "dc.open")]
-    DcOpen { handle: DcHandle, id: Option<u16> },
+    DcOpen {
+        handle: DcHandle,
+        id: Option<u16>,
+    },
     #[serde(rename = "dc.close")]
-    DcClose { handle: DcHandle },
+    DcClose {
+        handle: DcHandle,
+    },
     #[serde(rename = "dc.error")]
-    DcError { handle: DcHandle, message: String },
+    DcError {
+        handle: DcHandle,
+        message: String,
+    },
     #[serde(rename = "dc.bufferedamountlow")]
-    DcBufferedAmountLow { handle: DcHandle },
+    DcBufferedAmountLow {
+        handle: DcHandle,
+    },
     /// Message payloads are delivered through the raw sink, not serialised.
     #[serde(skip)]
-    DcMessage { handle: DcHandle, payload: Payload },
+    DcMessage {
+        handle: DcHandle,
+        payload: Payload,
+    },
     /// The remote asked our sender for a keyframe (PLI/FIR).
-    KeyframeRequest { tx: TxId },
+    KeyframeRequest {
+        tx: TxId,
+    },
     /// Bandwidth estimate for our outgoing media, in bits per second.
-    TargetBitrate { bps: u64 },
+    TargetBitrate {
+        bps: u64,
+    },
     /// Encoded media received on a transceiver. Raw path, not serialised.
     #[serde(skip)]
     MediaFrame(EncodedFrame),
     /// Decoded 48 kHz mono PCM for a receiver's playout, 20 ms per event.
     /// Raw path, not serialised.
     #[serde(skip)]
-    AudioPcm { tx: TxId, samples: Vec<i16> },
+    AudioPcm {
+        tx: TxId,
+        samples: Vec<i16>,
+    },
+    /// An engine-encoded frame (Opus) for a sender in transform mode. The page
+    /// runs it through its `RTCRtpScriptTransform` and returns it with
+    /// `send_frame`. Raw path, not serialised.
+    #[serde(skip)]
+    EncodedOut(EncodedFrame),
 }
 
 /// Receives engine events. Called from engine threads.
@@ -360,6 +403,13 @@ pub trait Peer: Send + Sync {
     /// Captured 48 kHz mono PCM for an audio sender (non-blocking). The engine
     /// runs echo cancellation, noise suppression and AGC, then encodes Opus.
     fn push_pcm(&self, tx: TxId, samples: Vec<i16>) -> Result<()>;
+    /// Route a transceiver's engine-side encoded frames through the page
+    /// (`RTCRtpScriptTransform`): `send` for our Opus before RTP, `recv` for
+    /// remote Opus before decode. Video is encoded and decoded in the page, so
+    /// only audio needs this.
+    fn set_transform(&self, tx: TxId, send: bool, recv: bool) -> Result<()>;
+    /// Decode a (transformed) received Opus frame into the playout.
+    fn decode_audio(&self, tx: TxId, data: Vec<u8>) -> Result<()>;
     fn local_description(&self) -> Option<SessionDescription>;
     fn remote_description(&self) -> Option<SessionDescription>;
     fn add_ice_candidate(&self, candidate: &IceCandidate) -> Result<()>;

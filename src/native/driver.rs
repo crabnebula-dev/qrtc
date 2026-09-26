@@ -1,31 +1,35 @@
 //! The per-connection driver: owns the `Rtc`, sockets, JSEP state and data
 //! channel queues. Every mutation of the `Rtc` is followed by [`Driver::drain`].
 
-use super::net::{bind_host_sockets, HostSocket};
 use super::audio::{AudioHub, AudioReceiver, AudioSender, CaptureProcessing};
 use super::jsep;
+use super::net::{bind_host_sockets, HostSocket};
 use super::stun::{self, Message, TransId};
 use super::turn::{TurnClient, TurnEvent};
 use super::{ChannelShared, Cmd, Shared};
 use crate::*;
-use std::collections::{HashMap, VecDeque};
+use std::collections::BTreeMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
-use str0m::net::{Protocol, Receive};
-use str0m::stats::PeerStats;
 use str0m::format::Codec;
 use str0m::media::{Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid};
+use str0m::net::{Protocol, Receive};
+use str0m::stats::PeerStats;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
-use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
 /// A STUN or TURN server after DNS resolution.
 #[derive(Debug, Clone)]
 pub(crate) enum IceServerAddr {
     Stun(SocketAddr),
-    Turn { addr: SocketAddr, username: String, password: String },
+    Turn {
+        addr: SocketAddr,
+        username: String,
+        password: String,
+    },
 }
 
 /// Results of background work (DNS, mDNS) delivered back to the driver.
@@ -63,7 +67,10 @@ fn parse_ice_url(url: &str) -> Option<(bool, String, u16)> {
     }
     let (host, port) = if let Some(h) = hostport.strip_prefix('[') {
         let (h, p) = h.split_once(']')?;
-        (h.to_string(), p.trim_start_matches(':').parse().unwrap_or(default_port))
+        (
+            h.to_string(),
+            p.trim_start_matches(':').parse().unwrap_or(default_port),
+        )
     } else {
         match hostport.rsplit_once(':') {
             Some((h, p)) => (h.to_string(), p.parse().ok()?),
@@ -77,8 +84,14 @@ pub(crate) async fn resolve_ice_servers(config: RtcConfiguration) -> Vec<IceServ
     let mut out = Vec::new();
     for s in &config.ice_servers {
         for url in &s.urls {
-            let Some((is_turn, host, port)) = parse_ice_url(url) else { continue };
-            let lookup = tokio::time::timeout(Duration::from_secs(3), tokio::net::lookup_host((host.as_str(), port))).await;
+            let Some((is_turn, host, port)) = parse_ice_url(url) else {
+                continue;
+            };
+            let lookup = tokio::time::timeout(
+                Duration::from_secs(3),
+                tokio::net::lookup_host((host.as_str(), port)),
+            )
+            .await;
             let addrs: Vec<SocketAddr> = match lookup {
                 Ok(Ok(a)) => a.collect(),
                 _ => {
@@ -159,6 +172,9 @@ struct Tx {
     created_by_remote: bool,
     stop_sent: bool,
     last_kf_req: Option<Instant>,
+    /// Video: nothing written yet on this sender, so it must start with a keyframe.
+    awaiting_key: bool,
+    last_key_ask: Option<Instant>,
 }
 
 impl Tx {
@@ -177,13 +193,19 @@ impl Tx {
             created_by_remote: false,
             stop_sent: false,
             last_kf_req: None,
+            awaiting_key: true,
+            last_key_ask: None,
         }
     }
     fn stopped(&self) -> bool {
         self.spec.stopped || self.spec.direction == Direction::Stopped
     }
     fn set_remote(&mut self, sec: &jsep::Section) {
-        self.remote_dir = Some(if sec.port_zero { Direction::Inactive } else { sec.direction });
+        self.remote_dir = Some(if sec.port_zero {
+            Direction::Inactive
+        } else {
+            sec.direction
+        });
         self.remote_streams = sec.stream_ids();
         self.remote_track = sec.track_id();
     }
@@ -265,10 +287,18 @@ pub(crate) struct Driver {
     uid: u64,
     audio_senders: HashMap<TxId, AudioSender>,
     audio_receivers: HashMap<TxId, AudioReceiver>,
+    /// Transceivers whose engine-side Opus goes through the page's transform.
+    transform_send: HashSet<TxId>,
+    transform_recv: HashSet<TxId>,
+    bwe_desired_set: bool,
 }
 
 fn norm(sdp: &str) -> String {
-    sdp.lines().map(str::trim_end).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("\n")
+    sdp.lines()
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn has_app(sdp: &str) -> bool {
@@ -295,6 +325,8 @@ impl Driver {
             .clear_codecs()
             .enable_opus(true, false)
             .enable_vp8(true)
+            // TWCC bandwidth estimation drives the page's video encoder bitrate.
+            .enable_bwe(Some(str0m::bwe::Bitrate::kbps(800)))
             .set_stats_interval(Some(Duration::from_secs(1)))
             .build(now);
         let sockets = bind_host_sockets().map_err(op("bind sockets"))?;
@@ -345,6 +377,9 @@ impl Driver {
             uid,
             audio_senders: HashMap::new(),
             audio_receivers: HashMap::new(),
+            transform_send: HashSet::new(),
+            transform_recv: HashSet::new(),
+            bwe_desired_set: false,
         };
         for s in d.sockets.iter().filter(|_| !relay_only) {
             match Candidate::host(s.local, "udp") {
@@ -480,7 +515,11 @@ impl Driver {
     }
 
     fn handle_packet(&mut self, idx: usize, from: SocketAddr, data: &[u8]) {
-        if let Some(ti) = self.turns.iter().position(|t| t.sock_idx == idx && t.server == from) {
+        if let Some(ti) = self
+            .turns
+            .iter()
+            .position(|t| t.sock_idx == idx && t.server == from)
+        {
             let (ev, out) = self.turns[ti].handle(Instant::now(), data);
             self.send_to_server(ti, out);
             self.on_turn_events(ti, ev);
@@ -502,11 +541,20 @@ impl Driver {
                 }
             }
         }
-        let Some(sock) = self.sockets.get(idx) else { return };
-        let Ok(contents) = data.try_into() else { return };
+        let Some(sock) = self.sockets.get(idx) else {
+            return;
+        };
+        let Ok(contents) = data.try_into() else {
+            return;
+        };
         let input = Input::Receive(
             Instant::now(),
-            Receive { proto: Protocol::Udp, source: from, destination: sock.local, contents },
+            Receive {
+                proto: Protocol::Udp,
+                source: from,
+                destination: sock.local,
+                contents,
+            },
         );
         if !self.rtc.accepts(&input) {
             return;
@@ -533,6 +581,19 @@ impl Driver {
             Cmd::RequestKeyframe(tx) => self.request_keyframe(tx),
             Cmd::RestartIce => self.ice_restart = true,
             Cmd::Pcm(tx, samples) => self.push_pcm(tx, samples),
+            Cmd::Transform(tx, send, recv) => {
+                if send {
+                    self.transform_send.insert(tx);
+                } else {
+                    self.transform_send.remove(&tx);
+                }
+                if recv {
+                    self.transform_recv.insert(tx);
+                } else {
+                    self.transform_recv.remove(&tx);
+                }
+            }
+            Cmd::DecodeAudio(tx, data) => self.play_opus(tx, &data, true),
             Cmd::SetLocal(d, r) => {
                 let _ = r.send(self.set_local(d));
             }
@@ -582,7 +643,10 @@ impl Driver {
     // ============================ JSEP ============================
 
     fn tx_by_mid(&self, mid: &str) -> Option<TxId> {
-        self.txs.iter().find(|(_, t)| t.mid.as_deref() == Some(mid)).map(|(id, _)| *id)
+        self.txs
+            .iter()
+            .find(|(_, t)| t.mid.as_deref() == Some(mid))
+            .map(|(id, _)| *id)
     }
 
     fn tx_states(&self) -> Vec<TransceiverState> {
@@ -607,8 +671,13 @@ impl Driver {
             } else {
                 t.spec.direction
             };
-            let msid = dir.sends().then(|| (t.spec.stream_ids.clone(), t.spec.sender_track_id.clone()));
-            Some(jsep::Rewrite { direction: dir, msid })
+            let msid = dir
+                .sends()
+                .then(|| (t.spec.stream_ids.clone(), t.spec.sender_track_id.clone()));
+            Some(jsep::Rewrite {
+                direction: dir,
+                msid,
+            })
         })
     }
 
@@ -617,7 +686,10 @@ impl Driver {
             Sig::HaveRemoteOffer => return Err(Error::InvalidState("have-remote-offer".into())),
             Sig::HaveLocalOffer => {
                 if let Some((sdp, _)) = &self.local_offer {
-                    return Ok(SessionDescription { kind: SdpType::Offer, sdp: sdp.clone() });
+                    return Ok(SessionDescription {
+                        kind: SdpType::Offer,
+                        sdp: sdp.clone(),
+                    });
                 }
             }
             Sig::Stable => {}
@@ -658,28 +730,33 @@ impl Driver {
                 }
             }
         }
-        for ch in self.chans.values_mut().filter(|c| c.id.is_none() && !c.closed) {
+        for ch in self
+            .chans
+            .values_mut()
+            .filter(|c| c.id.is_none() && !c.closed)
+        {
             ch.id = Some(api.add_channel_with_config(ch.config.clone()));
         }
         if self.ice_restart {
             api.ice_restart(true);
         }
-        let applied = api.apply();
+        // JSEP: an unchanged session still gets an offer (vendored str0m patch).
+        let (offer, pending) = api.apply_offer();
         self.rebuild_by_id();
         self.drain();
-        match applied {
-            Some((offer, pending)) => {
-                let sdp = self.munge(&offer.to_sdp_string(), false);
-                self.created_offer = Some((sdp.clone(), pending));
-                Ok(SessionDescription { kind: SdpType::Offer, sdp })
-            }
-            None => Err(Error::Operation("nothing to negotiate".into())),
-        }
+        let sdp = self.munge(&offer.to_sdp_string(), false);
+        self.created_offer = Some((sdp.clone(), pending));
+        Ok(SessionDescription {
+            kind: SdpType::Offer,
+            sdp,
+        })
     }
 
     fn create_answer(&mut self) -> Result<SessionDescription> {
         if self.sig != Sig::HaveRemoteOffer {
-            return Err(Error::InvalidState("createAnswer needs a remote offer".into()));
+            return Err(Error::InvalidState(
+                "createAnswer needs a remote offer".into(),
+            ));
         }
         // str0m's accept_offer happens here rather than in setRemoteDescription,
         // so tracks added after the remote offer (matrix-js-sdk's inbound flow)
@@ -689,8 +766,9 @@ impl Driver {
                 Some(p) => (p.clone(), has_app(p)),
                 None => return Err(Error::InvalidState("no remote offer".into())),
             };
-            let offer = SdpOffer::from_sdp_string(&sdp)
-                .map_err(|e| Error::Operation(format!("Failed to parse SessionDescription: {e}")))?;
+            let offer = SdpOffer::from_sdp_string(&sdp).map_err(|e| {
+                Error::Operation(format!("Failed to parse SessionDescription: {e}"))
+            })?;
             let res = self.rtc.sdp_api().accept_offer(offer);
             self.drain();
             let answer = res.map_err(op("createAnswer"))?;
@@ -708,7 +786,10 @@ impl Driver {
         }
         let sdp = self.munge(self.raw_answer.as_deref().unwrap_or_default(), true);
         self.answer = Some(sdp.clone());
-        Ok(SessionDescription { kind: SdpType::Answer, sdp })
+        Ok(SessionDescription {
+            kind: SdpType::Answer,
+            sdp,
+        })
     }
 
     fn rollback_local(&mut self) {
@@ -730,11 +811,14 @@ impl Driver {
 
     fn rollback_remote(&mut self) -> Result<()> {
         if self.raw_answer.is_some() {
-            return Err(Error::InvalidState("remote offer was already applied by createAnswer()".into()));
+            return Err(Error::InvalidState(
+                "remote offer was already applied by createAnswer()".into(),
+            ));
         }
         self.pending_remote = None;
         self.buffered_candidates.clear();
-        self.txs.retain(|_, t| !(t.created_by_remote && t.mid_pending));
+        self.txs
+            .retain(|_, t| !(t.created_by_remote && t.mid_pending));
         for t in self.txs.values_mut() {
             if t.mid_pending {
                 t.mid = None;
@@ -749,17 +833,23 @@ impl Driver {
     }
 
     fn set_local(&mut self, d: SessionDescription) -> Result<Vec<TransceiverState>> {
+        log::trace!("local {:?}:\n{}", d.kind, d.sdp);
         match d.kind {
             SdpType::Offer => {
                 if self.sig != Sig::Stable {
-                    return Err(Error::InvalidState(format!("cannot set local offer in {:?}", self.sig)));
+                    return Err(Error::InvalidState(format!(
+                        "cannot set local offer in {:?}",
+                        self.sig
+                    )));
                 }
                 let Some((sdp, pending)) = self.created_offer.take() else {
                     return Err(Error::InvalidState("no offer was created".into()));
                 };
                 if norm(&sdp) != norm(&d.sdp) {
                     self.created_offer = Some((sdp, pending));
-                    return Err(Error::InvalidModification("SDP munging is not supported".into()));
+                    return Err(Error::InvalidModification(
+                        "SDP munging is not supported".into(),
+                    ));
                 }
                 for t in self.txs.values_mut() {
                     if let Some(mid) = t.offered_mid.take() {
@@ -773,15 +863,27 @@ impl Driver {
             }
             SdpType::Answer => {
                 let ok = self.sig == Sig::HaveRemoteOffer
-                    && self.answer.as_ref().map(|a| norm(a) == norm(&d.sdp)).unwrap_or(false);
+                    && self
+                        .answer
+                        .as_ref()
+                        .map(|a| norm(a) == norm(&d.sdp))
+                        .unwrap_or(false);
                 if !ok {
-                    return Err(Error::InvalidModification("answer does not match createAnswer()".into()));
+                    return Err(Error::InvalidModification(
+                        "answer does not match createAnswer()".into(),
+                    ));
                 }
                 let answer = self.answer.take().unwrap_or_default();
                 for sec in jsep::parse(&answer) {
-                    let Some(id) = sec.mid.as_deref().and_then(|m| self.tx_by_mid(m)) else { continue };
+                    let Some(id) = sec.mid.as_deref().and_then(|m| self.tx_by_mid(m)) else {
+                        continue;
+                    };
                     if let Some(t) = self.txs.get_mut(&id) {
-                        t.current_direction = Some(if sec.port_zero { Direction::Stopped } else { sec.direction });
+                        t.current_direction = Some(if sec.port_zero {
+                            Direction::Stopped
+                        } else {
+                            sec.direction
+                        });
                         t.negotiated_direction = Some(t.spec.direction);
                         t.mid_pending = false;
                         if sec.port_zero {
@@ -808,6 +910,7 @@ impl Driver {
     }
 
     fn set_remote(&mut self, d: SessionDescription) -> Result<Vec<TransceiverState>> {
+        log::trace!("remote {:?}:\n{}", d.kind, d.sdp);
         match d.kind {
             SdpType::Offer => {
                 match self.sig {
@@ -816,10 +919,13 @@ impl Driver {
                     Sig::HaveRemoteOffer => self.rollback_remote()?,
                     Sig::Stable => {}
                 }
-                SdpOffer::from_sdp_string(&d.sdp)
-                    .map_err(|e| Error::Operation(format!("Failed to parse SessionDescription: {e}")))?;
+                SdpOffer::from_sdp_string(&d.sdp).map_err(|e| {
+                    Error::Operation(format!("Failed to parse SessionDescription: {e}"))
+                })?;
                 for sec in jsep::parse(&d.sdp) {
-                    let jsep::SectionKind::Media(kind) = sec.kind else { continue };
+                    let jsep::SectionKind::Media(kind) = sec.kind else {
+                        continue;
+                    };
                     let Some(mid) = sec.mid.clone() else { continue };
                     let id = match self.tx_by_mid(&mid) {
                         Some(id) => id,
@@ -828,7 +934,10 @@ impl Driver {
                                 .txs
                                 .iter()
                                 .filter(|(_, t)| {
-                                    t.spec.kind == kind && t.mid.is_none() && !t.stopped() && t.spec.from_add_track
+                                    t.spec.kind == kind
+                                        && t.mid.is_none()
+                                        && !t.stopped()
+                                        && t.spec.from_add_track
                                 })
                                 .map(|(id, _)| *id)
                                 .min();
@@ -873,9 +982,13 @@ impl Driver {
                 if self.sig != Sig::HaveLocalOffer {
                     return Err(Error::InvalidState("no local offer to answer".into()));
                 }
-                let answer = SdpAnswer::from_sdp_string(&d.sdp)
-                    .map_err(|e| Error::Operation(format!("Failed to parse SessionDescription: {e}")))?;
-                let (sdp, pending) = self.local_offer.take().expect("have-local-offer has an offer");
+                let answer = SdpAnswer::from_sdp_string(&d.sdp).map_err(|e| {
+                    Error::Operation(format!("Failed to parse SessionDescription: {e}"))
+                })?;
+                let (sdp, pending) = self
+                    .local_offer
+                    .take()
+                    .expect("have-local-offer has an offer");
                 let res = self.rtc.sdp_api().accept_answer(pending, answer);
                 self.drain();
                 if let Err(e) = res {
@@ -883,12 +996,18 @@ impl Driver {
                     return Err(Error::Operation(format!("setRemoteDescription: {e}")));
                 }
                 for sec in jsep::parse(&d.sdp) {
-                    let Some(id) = sec.mid.as_deref().and_then(|m| self.tx_by_mid(m)) else { continue };
+                    let Some(id) = sec.mid.as_deref().and_then(|m| self.tx_by_mid(m)) else {
+                        continue;
+                    };
                     if let Some(t) = self.txs.get_mut(&id) {
                         t.mid_pending = false;
-                        t.negotiated_direction = t.offered_direction.take().or(t.negotiated_direction);
-                        t.current_direction =
-                            Some(if sec.port_zero { Direction::Stopped } else { sec.direction.invert() });
+                        t.negotiated_direction =
+                            t.offered_direction.take().or(t.negotiated_direction);
+                        t.current_direction = Some(if sec.port_zero {
+                            Direction::Stopped
+                        } else {
+                            sec.direction.invert()
+                        });
                         if t.stopped() || sec.port_zero {
                             t.stop_sent = true;
                         }
@@ -926,20 +1045,66 @@ impl Driver {
     }
 
     fn send_frame(&mut self, f: EncodedFrame) {
-        let Some(t) = self.txs.get(&f.tx) else { return };
+        let Some(t) = self.txs.get(&f.tx) else {
+            log::debug!("frame for unknown tx {}", f.tx);
+            return;
+        };
         let can_send = !t.stopped() && t.current_direction.map(|d| d.sends()).unwrap_or(false);
-        let Some(mid) = t.mid.clone().filter(|_| can_send) else { return };
-        let Some(w) = self.rtc.writer(Mid::from(mid.as_str())) else { return };
-        let Some(pt) = w.payload_params().find(|p| same_codec(p.spec().codec, f.codec)).map(|p| p.pt()) else {
+        let Some(mid) = t.mid.clone().filter(|_| can_send) else {
+            log::debug!(
+                "tx {} cannot send (mid {:?}, current {:?})",
+                f.tx,
+                t.mid,
+                t.current_direction
+            );
+            return;
+        };
+        if f.codec.kind() == TrackKind::Video {
+            // Deltas before the first keyframe cannot be decoded by anyone, and
+            // an SFU keeps the track dark until it sees one: ask the page.
+            let now = Instant::now();
+            if let Some(t) = self.txs.get_mut(&f.tx) {
+                if f.keyframe {
+                    t.awaiting_key = false;
+                } else if t.awaiting_key {
+                    if t.last_key_ask
+                        .map(|l| now - l >= Duration::from_millis(200))
+                        .unwrap_or(true)
+                    {
+                        t.last_key_ask = Some(now);
+                        self.emit(PeerEvent::KeyframeRequest { tx: f.tx });
+                    }
+                    return;
+                }
+            }
+        }
+        let Some(w) = self.rtc.writer(Mid::from(mid.as_str())) else {
+            log::debug!("tx {} ({mid}): no writer", f.tx);
+            return;
+        };
+        let Some(pt) = w
+            .payload_params()
+            .find(|p| same_codec(p.spec().codec, f.codec))
+            .map(|p| p.pt())
+        else {
             log::debug!("tx {} ({mid}): {:?} not negotiated", f.tx, f.codec);
             return;
         };
         let rtp_time = match f.codec.kind() {
-            TrackKind::Audio => MediaTime::new(f.timestamp_us * 48 / 1000, Frequency::FORTY_EIGHT_KHZ),
+            TrackKind::Audio => {
+                MediaTime::new(f.timestamp_us * 48 / 1000, Frequency::FORTY_EIGHT_KHZ)
+            }
             TrackKind::Video => MediaTime::new(f.timestamp_us * 9 / 100, Frequency::NINETY_KHZ),
         };
         if let Err(e) = w.write(pt, Instant::now(), rtp_time, f.data) {
             log::debug!("write {mid}: {e}");
+        }
+        if f.codec.kind() == TrackKind::Video && !self.bwe_desired_set {
+            // Let the estimator probe up to what a 720p30 VP8 stream wants.
+            self.bwe_desired_set = true;
+            self.rtc
+                .bwe()
+                .set_desired_bitrate(str0m::bwe::Bitrate::kbps(2_500));
         }
         self.drain();
     }
@@ -952,22 +1117,46 @@ impl Driver {
             AudioSender::new(key)
         });
         let packets = sender.push(&audio, &samples);
+        let transform = self.transform_send.contains(&tx);
         for (start, data) in packets {
-            self.send_frame(EncodedFrame {
+            let f = EncodedFrame {
                 tx,
                 codec: CodecName::Opus,
                 keyframe: true,
                 timestamp_us: start * 1000 / 48,
                 data: data.into(),
-            });
+            };
+            if transform {
+                self.emit(PeerEvent::EncodedOut(f));
+            } else {
+                self.send_frame(f);
+            }
         }
     }
 
+    fn play_opus(&mut self, tx: TxId, data: &[u8], contiguous: bool) {
+        let key = (self.uid, tx);
+        let rx = self
+            .audio_receivers
+            .entry(tx)
+            .or_insert_with(AudioReceiver::new);
+        let pcm = rx.decode(data, contiguous);
+        if rx.packets == 1 {
+            self.audio.add_playout(key, self.events.clone());
+        }
+        self.audio.push_playout(key, &pcm);
+    }
+
     fn request_keyframe(&mut self, tx: TxId) {
-        let Some(mid) = self.txs.get(&tx).and_then(|t| t.mid.clone()) else { return };
+        let Some(mid) = self.txs.get(&tx).and_then(|t| t.mid.clone()) else {
+            return;
+        };
         if let Some(t) = self.txs.get_mut(&tx) {
             let now = Instant::now();
-            if t.last_kf_req.map(|l| now - l < Duration::from_millis(300)).unwrap_or(false) {
+            if t.last_kf_req
+                .map(|l| now - l < Duration::from_millis(300))
+                .unwrap_or(false)
+            {
                 return;
             }
             t.last_kf_req = Some(now);
@@ -994,14 +1183,19 @@ impl Driver {
                 match super::mdns::resolve(&host, Duration::from_secs(3)).await {
                     Some(ip) => {
                         log::debug!("mDNS {host} -> {ip}");
-                        let _ = tx.send(Aux::RemoteCandidate(cand.replacen(&host, &ip.to_string(), 1)));
+                        let _ = tx.send(Aux::RemoteCandidate(cand.replacen(
+                            &host,
+                            &ip.to_string(),
+                            1,
+                        )));
                     }
                     None => log::debug!("mDNS {host}: no answer"),
                 }
             });
             return Ok(());
         }
-        Candidate::from_sdp_string(s).map_err(|e| Error::Operation(format!("Error processing ICE candidate: {e}")))?;
+        Candidate::from_sdp_string(s)
+            .map_err(|e| Error::Operation(format!("Error processing ICE candidate: {e}")))?;
         self.add_remote_candidate_str(s);
         Ok(())
     }
@@ -1029,7 +1223,10 @@ impl Driver {
             _ => Reliability::Reliable,
         };
         let negotiated = if init.negotiated.unwrap_or(false) {
-            Some(init.id.ok_or_else(|| Error::Syntax("negotiated channel needs an id".into()))?)
+            Some(
+                init.id
+                    .ok_or_else(|| Error::Syntax("negotiated channel needs an id".into()))?,
+            )
         } else {
             None
         };
@@ -1055,7 +1252,11 @@ impl Driver {
                 queued_bytes: 0,
             },
         );
-        self.shared.channels.lock().unwrap().insert(handle, ChannelShared::default());
+        self.shared
+            .channels
+            .lock()
+            .unwrap()
+            .insert(handle, ChannelShared::default());
         if self.app_negotiated {
             self.create_pending_direct();
         }
@@ -1096,7 +1297,11 @@ impl Driver {
     }
 
     fn rebuild_by_id(&mut self) {
-        self.by_id = self.chans.iter().filter_map(|(h, c)| c.id.map(|id| (id, *h))).collect();
+        self.by_id = self
+            .chans
+            .iter()
+            .filter_map(|(h, c)| c.id.map(|id| (id, *h)))
+            .collect();
     }
 
     fn start_gathering(&mut self) {
@@ -1104,9 +1309,20 @@ impl Driver {
             return;
         }
         self.gathering_started = true;
-        let mid = self.local_sdp.as_deref().map(sdp_mids).and_then(|m| m.into_iter().next().flatten());
-        self.emit(PeerEvent::IceGatheringStateChange { state: "gathering".into() });
-        let all: Vec<Candidate> = self.host_candidates.iter().chain(self.gathered.iter()).cloned().collect();
+        let mid = self
+            .local_sdp
+            .as_deref()
+            .map(sdp_mids)
+            .and_then(|m| m.into_iter().next().flatten());
+        self.emit(PeerEvent::IceGatheringStateChange {
+            state: "gathering".into(),
+        });
+        let all: Vec<Candidate> = self
+            .host_candidates
+            .iter()
+            .chain(self.gathered.iter())
+            .cloned()
+            .collect();
         for c in &all {
             self.emit_candidate(c, mid.clone());
         }
@@ -1114,12 +1330,19 @@ impl Driver {
     }
 
     fn first_mid(&self) -> Option<String> {
-        self.local_sdp.as_deref().map(sdp_mids).and_then(|m| m.into_iter().next().flatten())
+        self.local_sdp
+            .as_deref()
+            .map(sdp_mids)
+            .and_then(|m| m.into_iter().next().flatten())
     }
 
     fn emit_candidate(&self, c: &Candidate, mid: Option<String>) {
         self.emit(PeerEvent::IceCandidate {
-            candidate: Some(IceCandidate { candidate: c.to_sdp_string(), sdp_mid: mid, sdp_m_line_index: Some(0) }),
+            candidate: Some(IceCandidate {
+                candidate: c.to_sdp_string(),
+                sdp_mid: mid,
+                sdp_m_line_index: Some(0),
+            }),
         });
     }
 
@@ -1150,10 +1373,13 @@ impl Driver {
     }
 
     fn check_gathering_complete(&mut self) {
-        let done = !self.resolving && self.stun_txns.is_empty() && self.turns.iter().all(|t| t.done);
+        let done =
+            !self.resolving && self.stun_txns.is_empty() && self.turns.iter().all(|t| t.done);
         if done && self.gathering_started && !self.gathering_complete {
             self.gathering_complete = true;
-            self.emit(PeerEvent::IceGatheringStateChange { state: "complete".into() });
+            self.emit(PeerEvent::IceGatheringStateChange {
+                state: "complete".into(),
+            });
             self.emit(PeerEvent::IceCandidate { candidate: None });
         }
     }
@@ -1176,12 +1402,26 @@ impl Driver {
                         let _ = self.sockets[idx].socket.try_send_to(&bytes, addr);
                         self.stun_txns.insert(
                             m.tid,
-                            StunTxn { server: addr, sock_idx: idx, msg: bytes, tries: 1, next: now + Duration::from_millis(250) },
+                            StunTxn {
+                                server: addr,
+                                sock_idx: idx,
+                                msg: bytes,
+                                tries: 1,
+                                next: now + Duration::from_millis(250),
+                            },
                         );
                     }
                 }
-                IceServerAddr::Turn { addr, username, password } => {
-                    let Some(idx) = self.sockets.iter().position(|s| s.local.is_ipv4() == addr.is_ipv4()) else {
+                IceServerAddr::Turn {
+                    addr,
+                    username,
+                    password,
+                } => {
+                    let Some(idx) = self
+                        .sockets
+                        .iter()
+                        .position(|s| s.local.is_ipv4() == addr.is_ipv4())
+                    else {
                         continue;
                     };
                     let mut t = TurnClient::new(addr, idx, username, password);
@@ -1224,11 +1464,20 @@ impl Driver {
                     self.check_gathering_complete();
                 }
                 TurnEvent::Data { peer, data } => {
-                    let Some(relay) = self.turns[ti].relay else { continue };
-                    let Ok(contents) = data.as_slice().try_into() else { continue };
+                    let Some(relay) = self.turns[ti].relay else {
+                        continue;
+                    };
+                    let Ok(contents) = data.as_slice().try_into() else {
+                        continue;
+                    };
                     let input = Input::Receive(
                         Instant::now(),
-                        Receive { proto: Protocol::Udp, source: peer, destination: relay, contents },
+                        Receive {
+                            proto: Protocol::Udp,
+                            source: peer,
+                            destination: relay,
+                            contents,
+                        },
                     );
                     if self.rtc.accepts(&input) {
                         if let Err(e) = self.rtc.handle_input(input) {
@@ -1267,9 +1516,16 @@ impl Driver {
             self.send_to_server(ti, out);
             self.on_turn_events(ti, ev);
         }
-        let due: Vec<TransId> = self.stun_txns.iter().filter(|(_, t)| t.next <= now).map(|(k, _)| *k).collect();
+        let due: Vec<TransId> = self
+            .stun_txns
+            .iter()
+            .filter(|(_, t)| t.next <= now)
+            .map(|(k, _)| *k)
+            .collect();
         for tid in due {
-            let Some(t) = self.stun_txns.get_mut(&tid) else { continue };
+            let Some(t) = self.stun_txns.get_mut(&tid) else {
+                continue;
+            };
             if t.tries >= 5 {
                 log::debug!("STUN {} timed out", t.server);
                 self.stun_txns.remove(&tid);
@@ -1277,7 +1533,9 @@ impl Driver {
             }
             t.tries += 1;
             t.next = now + Duration::from_millis(250 << t.tries.min(4));
-            let _ = self.sockets[t.sock_idx].socket.try_send_to(&t.msg, t.server);
+            let _ = self.sockets[t.sock_idx]
+                .socket
+                .try_send_to(&t.msg, t.server);
         }
         self.check_gathering_complete();
     }
@@ -1293,19 +1551,27 @@ impl Driver {
         let Some(ch) = self.chans.get(&h) else { return };
         let (open, queued, id) = (ch.open, ch.queued_bytes, ch.id);
         let sctp = match id.filter(|_| open) {
-            Some(id) => self.rtc.channel(id).map(|mut c| c.buffered_amount() as u64).unwrap_or(0),
+            Some(id) => self
+                .rtc
+                .channel(id)
+                .map(|mut c| c.buffered_amount() as u64)
+                .unwrap_or(0),
             None => 0,
         };
-        self.shared
-            .channels
-            .lock()
-            .unwrap()
-            .insert(h, ChannelShared { open, buffered: queued + sctp });
+        self.shared.channels.lock().unwrap().insert(
+            h,
+            ChannelShared {
+                open,
+                buffered: queued + sctp,
+            },
+        );
     }
 
     fn flush(&mut self, h: DcHandle) {
         let (id, mut queue) = match self.chans.get_mut(&h) {
-            Some(ch) if ch.open && ch.id.is_some() => (ch.id.unwrap(), std::mem::take(&mut ch.queue)),
+            Some(ch) if ch.open && ch.id.is_some() => {
+                (ch.id.unwrap(), std::mem::take(&mut ch.queue))
+            }
             _ => return,
         };
         let mut sent = 0u64;
@@ -1338,7 +1604,9 @@ impl Driver {
     }
 
     fn close_dc(&mut self, h: DcHandle) {
-        let Some(ch) = self.chans.get_mut(&h) else { return };
+        let Some(ch) = self.chans.get_mut(&h) else {
+            return;
+        };
         if ch.closed {
             return;
         }
@@ -1371,9 +1639,13 @@ impl Driver {
                     self.emit(PeerEvent::IceConnectionStateChange { state: st.into() });
                 }
                 match s {
-                    IceConnectionState::Checking if !self.dtls_connected => self.set_conn("connecting"),
+                    IceConnectionState::Checking if !self.dtls_connected => {
+                        self.set_conn("connecting")
+                    }
                     IceConnectionState::Disconnected => self.set_conn("disconnected"),
-                    IceConnectionState::Connected | IceConnectionState::Completed if self.dtls_connected => {
+                    IceConnectionState::Connected | IceConnectionState::Completed
+                        if self.dtls_connected =>
+                    {
                         self.set_conn("connected")
                     }
                     _ => {}
@@ -1398,14 +1670,20 @@ impl Driver {
                         }
                     }
                     self.update_shared(h);
-                    self.emit(PeerEvent::DcOpen { handle: h, id: stream });
+                    self.emit(PeerEvent::DcOpen {
+                        handle: h,
+                        id: stream,
+                    });
                     self.pending_flush.push(h);
                 } else {
                     let config = self
                         .rtc
                         .channel(id)
                         .and_then(|c| c.config().cloned())
-                        .unwrap_or_else(|| ChannelConfig { label: label.clone(), ..Default::default() });
+                        .unwrap_or_else(|| ChannelConfig {
+                            label: label.clone(),
+                            ..Default::default()
+                        });
                     let h = self.next_handle;
                     self.next_handle += 1;
                     let (mpl, mr) = match config.reliability {
@@ -1439,7 +1717,10 @@ impl Driver {
                     self.by_id.insert(id, h);
                     self.update_shared(h);
                     self.emit(PeerEvent::DataChannel { channel: info });
-                    self.emit(PeerEvent::DcOpen { handle: h, id: stream });
+                    self.emit(PeerEvent::DcOpen {
+                        handle: h,
+                        id: stream,
+                    });
                 }
             }
             Event::ChannelData(d) => {
@@ -1473,28 +1754,32 @@ impl Driver {
             Event::PeerStats(s) => self.stats = Some(s),
             Event::MediaData(d) => {
                 let mid = d.mid.to_string();
-                let Some(tx) = self.tx_by_mid(&mid) else { return };
-                let Some(codec) = codec_name(d.params.spec().codec) else { return };
+                let Some(tx) = self.tx_by_mid(&mid) else {
+                    return;
+                };
+                let Some(codec) = codec_name(d.params.spec().codec) else {
+                    return;
+                };
                 let keyframe = match (&d.codec_extra, codec) {
                     (_, CodecName::Vp8) => d.data.first().map(|b| b & 1 == 0).unwrap_or(false),
                     (_, CodecName::Opus) => true,
                     _ => false,
                 };
-                if codec == CodecName::Opus {
-                    let key = (self.uid, tx);
-                    let rx = self.audio_receivers.entry(tx).or_insert_with(AudioReceiver::new);
-                    let pcm = rx.decode(&d.data, d.contiguous);
-                    if rx.packets == 1 {
-                        self.audio.add_playout(key, self.events.clone());
-                    }
-                    self.audio.push_playout(key, &pcm);
+                if codec == CodecName::Opus && !self.transform_recv.contains(&tx) {
+                    self.play_opus(tx, &d.data, d.contiguous);
                     return;
                 }
                 if !d.contiguous && codec.kind() == TrackKind::Video {
                     self.request_keyframe(tx);
                 }
                 let timestamp_us = d.time.numer().saturating_mul(1_000_000) / d.time.denom() as u64;
-                self.emit(PeerEvent::MediaFrame(EncodedFrame { tx, codec, keyframe, timestamp_us, data: d.data }));
+                self.emit(PeerEvent::MediaFrame(EncodedFrame {
+                    tx,
+                    codec,
+                    keyframe,
+                    timestamp_us,
+                    data: d.data,
+                }));
             }
             Event::KeyframeRequest(r) => {
                 if let Some(tx) = self.tx_by_mid(&r.mid.to_string()) {
@@ -1510,7 +1795,12 @@ impl Driver {
                 self.emit(PeerEvent::TargetBitrate { bps });
             }
             Event::Closed => {
-                let open: Vec<DcHandle> = self.chans.iter().filter(|(_, c)| c.open).map(|(h, _)| *h).collect();
+                let open: Vec<DcHandle> = self
+                    .chans
+                    .iter()
+                    .filter(|(_, c)| c.open)
+                    .map(|(h, _)| *h)
+                    .collect();
                 for h in open {
                     if let Some(ch) = self.chans.get_mut(&h) {
                         ch.open = false;
@@ -1551,7 +1841,10 @@ impl Driver {
             }
         }
         for (tx, rx) in &self.audio_receivers {
-            let (depth, underruns, trimmed, target) = self.audio.playout_stats((self.uid, *tx)).unwrap_or_default();
+            let (depth, underruns, trimmed, target) = self
+                .audio
+                .playout_stats((self.uid, *tx))
+                .unwrap_or_default();
             out.insert(
                 format!("AIN{tx}"),
                 json!({"type": "engine-audio-in", "id": format!("AIN{tx}"), "tx": tx, "packetsReceived": rx.packets,

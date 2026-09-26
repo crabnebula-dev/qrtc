@@ -18,9 +18,15 @@ const SOFTWARE: &str = "tauri-plugin-webrtc";
 
 #[derive(Debug, Clone)]
 pub(crate) enum TurnEvent {
-    Allocated { relay: SocketAddr, mapped: Option<SocketAddr> },
+    Allocated {
+        relay: SocketAddr,
+        mapped: Option<SocketAddr>,
+    },
     Failed(String),
-    Data { peer: SocketAddr, data: Vec<u8> },
+    Data {
+        peer: SocketAddr,
+        data: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,7 +71,12 @@ pub(crate) struct TurnClient {
 }
 
 impl TurnClient {
-    pub(crate) fn new(server: SocketAddr, sock_idx: usize, username: String, password: String) -> Self {
+    pub(crate) fn new(
+        server: SocketAddr,
+        sock_idx: usize,
+        username: String,
+        password: String,
+    ) -> Self {
         Self {
             server,
             sock_idx,
@@ -97,12 +108,22 @@ impl TurnClient {
     }
 
     fn encode(&self, m: &Message) -> Vec<u8> {
-        self.with_auth(m.clone()).encode(self.key.as_ref().map(|k| k.as_slice()), true)
+        self.with_auth(m.clone())
+            .encode(self.key.as_ref().map(|k| k.as_slice()), true)
     }
 
     fn request(&mut self, now: Instant, kind: Kind, msg: Message) -> Vec<u8> {
         let bytes = self.encode(&msg);
-        self.txns.insert(msg.tid, Txn { kind, msg, tries: 1, next: now + RTO, auth_retried: false });
+        self.txns.insert(
+            msg.tid,
+            Txn {
+                kind,
+                msg,
+                tries: 1,
+                next: now + RTO,
+                auth_retried: false,
+            },
+        );
         bytes
     }
 
@@ -120,18 +141,30 @@ impl TurnClient {
         let mut out = Vec::new();
         if let Some((num, data)) = decode_channel_data(buf) {
             if let Some(peer) = self.by_num.get(&num) {
-                ev.push(TurnEvent::Data { peer: *peer, data: data.to_vec() });
+                ev.push(TurnEvent::Data {
+                    peer: *peer,
+                    data: data.to_vec(),
+                });
             }
             return (ev, out);
         }
-        let Some(msg) = Message::decode(buf) else { return (ev, out) };
+        let Some(msg) = Message::decode(buf) else {
+            return (ev, out);
+        };
         if msg.typ == DATA_INDICATION {
-            if let (Some(peer), Some(data)) = (msg.xor_addr(ATTR_XOR_PEER_ADDRESS), msg.get(ATTR_DATA)) {
-                ev.push(TurnEvent::Data { peer, data: data.to_vec() });
+            if let (Some(peer), Some(data)) =
+                (msg.xor_addr(ATTR_XOR_PEER_ADDRESS), msg.get(ATTR_DATA))
+            {
+                ev.push(TurnEvent::Data {
+                    peer,
+                    data: data.to_vec(),
+                });
             }
             return (ev, out);
         }
-        let Some(mut txn) = self.txns.remove(&msg.tid) else { return (ev, out) };
+        let Some(mut txn) = self.txns.remove(&msg.tid) else {
+            return (ev, out);
+        };
         match class(msg.typ) {
             Class::Success => {
                 if let Some(key) = &self.key {
@@ -152,7 +185,10 @@ impl TurnClient {
                     if let Some(nonce) = msg.get_str(ATTR_NONCE) {
                         self.nonce = Some(nonce);
                     }
-                    let fresh = Message { tid: new_tid(), ..txn.msg.clone() };
+                    let fresh = Message {
+                        tid: new_tid(),
+                        ..txn.msg.clone()
+                    };
                     txn.msg = fresh;
                     txn.auth_retried = true;
                     txn.tries = 1;
@@ -168,7 +204,14 @@ impl TurnClient {
         (ev, out)
     }
 
-    fn on_success(&mut self, now: Instant, kind: Kind, msg: &Message, ev: &mut Vec<TurnEvent>, out: &mut Vec<Vec<u8>>) {
+    fn on_success(
+        &mut self,
+        now: Instant,
+        kind: Kind,
+        msg: &Message,
+        ev: &mut Vec<TurnEvent>,
+        out: &mut Vec<Vec<u8>>,
+    ) {
         match kind {
             Kind::Allocate => {
                 let Some(relay) = msg.xor_addr(ATTR_XOR_RELAYED_ADDRESS) else {
@@ -179,7 +222,10 @@ impl TurnClient {
                 self.refresh_at = Some(now + Duration::from_secs(lifetime as u64 - 60));
                 self.relay = Some(relay);
                 self.done = true;
-                ev.push(TurnEvent::Allocated { relay, mapped: msg.xor_addr(ATTR_XOR_MAPPED_ADDRESS) });
+                ev.push(TurnEvent::Allocated {
+                    relay,
+                    mapped: msg.xor_addr(ATTR_XOR_MAPPED_ADDRESS),
+                });
             }
             Kind::Refresh(lifetime) => {
                 if lifetime > 0 {
@@ -190,8 +236,12 @@ impl TurnClient {
             Kind::Permission(ip) => {
                 self.perms.insert(ip, Some(now + PERMISSION_REFRESH));
                 // Bind channels for peers on this IP that are waiting.
-                let waiting: Vec<SocketAddr> =
-                    self.chans.iter().filter(|(p, c)| p.ip() == ip && !c.bound).map(|(p, _)| *p).collect();
+                let waiting: Vec<SocketAddr> = self
+                    .chans
+                    .iter()
+                    .filter(|(p, c)| p.ip() == ip && !c.bound)
+                    .map(|(p, _)| *p)
+                    .collect();
                 for peer in waiting {
                     out.extend(self.bind_channel(now, peer));
                 }
@@ -211,7 +261,10 @@ impl TurnClient {
         match kind {
             Kind::Allocate => {
                 self.done = true;
-                ev.push(TurnEvent::Failed(format!("TURN {} allocate: {why}", self.server)));
+                ev.push(TurnEvent::Failed(format!(
+                    "TURN {} allocate: {why}",
+                    self.server
+                )));
             }
             Kind::Permission(ip) => {
                 self.perms.remove(&ip);
@@ -230,8 +283,10 @@ impl TurnClient {
             Some(c) => c.num,
             None => return Vec::new(),
         };
-        let msg = Message::new(CHANNEL_BIND_REQUEST)
-            .attr(ATTR_CHANNEL_NUMBER, [(num >> 8) as u8, num as u8, 0, 0].to_vec());
+        let msg = Message::new(CHANNEL_BIND_REQUEST).attr(
+            ATTR_CHANNEL_NUMBER,
+            [(num >> 8) as u8, num as u8, 0, 0].to_vec(),
+        );
         let tid = msg.tid;
         let msg = msg.attr(ATTR_XOR_PEER_ADDRESS, encode_xor_addr(peer, &tid));
         vec![self.request(now, Kind::ChannelBind(peer, num), msg)]
@@ -241,7 +296,10 @@ impl TurnClient {
         self.perms.insert(ip, None);
         let msg = Message::new(CREATE_PERMISSION_REQUEST);
         let tid = msg.tid;
-        let msg = msg.attr(ATTR_XOR_PEER_ADDRESS, encode_xor_addr(SocketAddr::new(ip, 0), &tid));
+        let msg = msg.attr(
+            ATTR_XOR_PEER_ADDRESS,
+            encode_xor_addr(SocketAddr::new(ip, 0), &tid),
+        );
         vec![self.request(now, Kind::Permission(ip), msg)]
     }
 
@@ -257,7 +315,14 @@ impl TurnClient {
         if !self.chans.contains_key(&peer) && self.next_num <= 0x7FFF {
             let num = self.next_num;
             self.next_num += 1;
-            self.chans.insert(peer, Chan { num, bound: false, refresh_at: now });
+            self.chans.insert(
+                peer,
+                Chan {
+                    num,
+                    bound: false,
+                    refresh_at: now,
+                },
+            );
             self.by_num.insert(num, peer);
             if matches!(self.perms.get(&peer.ip()), Some(Some(_))) {
                 out.extend(self.bind_channel(now, peer));
@@ -281,9 +346,16 @@ impl TurnClient {
     pub(crate) fn poll(&mut self, now: Instant) -> (Vec<TurnEvent>, Vec<Vec<u8>>) {
         let mut ev = Vec::new();
         let mut out = Vec::new();
-        let due: Vec<TransId> = self.txns.iter().filter(|(_, t)| t.next <= now).map(|(k, _)| *k).collect();
+        let due: Vec<TransId> = self
+            .txns
+            .iter()
+            .filter(|(_, t)| t.next <= now)
+            .map(|(k, _)| *k)
+            .collect();
         for tid in due {
-            let Some(mut t) = self.txns.remove(&tid) else { continue };
+            let Some(mut t) = self.txns.remove(&tid) else {
+                continue;
+            };
             if t.tries >= MAX_TRIES {
                 self.on_failure(t.kind, "timeout".into(), &mut ev);
                 continue;
@@ -298,16 +370,25 @@ impl TurnClient {
         }
         if self.refresh_at.map(|r| r <= now).unwrap_or(false) {
             self.refresh_at = None;
-            let msg = Message::new(REFRESH_REQUEST).attr(ATTR_LIFETIME, 600u32.to_be_bytes().to_vec());
+            let msg =
+                Message::new(REFRESH_REQUEST).attr(ATTR_LIFETIME, 600u32.to_be_bytes().to_vec());
             out.push(self.request(now, Kind::Refresh(600), msg));
         }
-        let perms: Vec<IpAddr> =
-            self.perms.iter().filter(|(_, r)| r.map(|r| r <= now).unwrap_or(false)).map(|(ip, _)| *ip).collect();
+        let perms: Vec<IpAddr> = self
+            .perms
+            .iter()
+            .filter(|(_, r)| r.map(|r| r <= now).unwrap_or(false))
+            .map(|(ip, _)| *ip)
+            .collect();
         for ip in perms {
             out.extend(self.create_permission(now, ip));
         }
-        let chans: Vec<SocketAddr> =
-            self.chans.iter().filter(|(_, c)| c.bound && c.refresh_at <= now).map(|(p, _)| *p).collect();
+        let chans: Vec<SocketAddr> = self
+            .chans
+            .iter()
+            .filter(|(_, c)| c.bound && c.refresh_at <= now)
+            .map(|(p, _)| *p)
+            .collect();
         for peer in chans {
             if let Some(c) = self.chans.get_mut(&peer) {
                 c.refresh_at = now + CHANNEL_REFRESH;
@@ -327,7 +408,13 @@ impl TurnClient {
         if !self.closing {
             consider(self.refresh_at);
             consider(self.perms.values().filter_map(|r| *r).min());
-            consider(self.chans.values().filter(|c| c.bound).map(|c| c.refresh_at).min());
+            consider(
+                self.chans
+                    .values()
+                    .filter(|c| c.bound)
+                    .map(|c| c.refresh_at)
+                    .min(),
+            );
         }
         d
     }

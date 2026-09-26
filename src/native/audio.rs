@@ -34,8 +34,8 @@ pub(crate) fn opus_packet_samples(p: &[u8]) -> Option<usize> {
     let config = toc >> 3;
     let per_frame = match config {
         0..=11 => [480, 960, 1920, 2880][(config % 4) as usize], // SILK 10/20/40/60 ms
-        12..=15 => [480, 960][(config % 2) as usize],           // Hybrid 10/20 ms
-        _ => [120, 240, 480, 960][(config % 4) as usize],       // CELT 2.5/5/10/20 ms
+        12..=15 => [480, 960][(config % 2) as usize],            // Hybrid 10/20 ms
+        _ => [120, 240, 480, 960][(config % 4) as usize],        // CELT 2.5/5/10/20 ms
     };
     let frames = match toc & 3 {
         0 => 1,
@@ -56,7 +56,11 @@ pub struct CaptureProcessing {
 
 impl Default for CaptureProcessing {
     fn default() -> Self {
-        Self { echo_cancellation: true, noise_suppression: true, auto_gain_control: true }
+        Self {
+            echo_cancellation: true,
+            noise_suppression: true,
+            auto_gain_control: true,
+        }
     }
 }
 
@@ -153,7 +157,8 @@ impl AudioHub {
             for (m, s) in mix.iter_mut().zip(frame.iter()) {
                 *m += *s;
             }
-            p.pending.extend(frame.iter().map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16));
+            p.pending
+                .extend(frame.iter().map(|s| (s.clamp(-1.0, 1.0) * 32767.0) as i16));
             if p.pending.len() >= F20 {
                 out.push((p.sink.clone(), p.tx, std::mem::take(&mut p.pending)));
             }
@@ -174,18 +179,23 @@ impl AudioHub {
     }
 
     pub(crate) fn add_playout(&self, key: (u64, TxId), sink: EventSink) {
-        self.inner.lock().unwrap().playouts.entry(key).or_insert_with(|| Playout {
-            queue: VecDeque::new(),
-            started: false,
-            pending: Vec::new(),
-            sink,
-            tx: key.1,
-            underruns: 0,
-            trimmed: 0,
-            target: START_TARGET,
-            stable: 0,
-            last: [0f32; F10],
-        });
+        self.inner
+            .lock()
+            .unwrap()
+            .playouts
+            .entry(key)
+            .or_insert_with(|| Playout {
+                queue: VecDeque::new(),
+                started: false,
+                pending: Vec::new(),
+                sink,
+                tx: key.1,
+                underruns: 0,
+                trimmed: 0,
+                target: START_TARGET,
+                stable: 0,
+                last: [0f32; F10],
+            });
     }
 
     pub(crate) fn push_playout(&self, key: (u64, TxId), pcm: &[f32]) {
@@ -201,7 +211,9 @@ impl AudioHub {
 
     pub(crate) fn playout_stats(&self, key: (u64, TxId)) -> Option<(usize, u64, u64, usize)> {
         let g = self.inner.lock().unwrap();
-        g.playouts.get(&key).map(|p| (p.queue.len(), p.underruns, p.trimmed, p.target))
+        g.playouts
+            .get(&key)
+            .map(|p| (p.queue.len(), p.underruns, p.trimmed, p.target))
     }
 
     pub(crate) fn remove_pc(&self, pc: u64) {
@@ -260,7 +272,14 @@ impl AudioSender {
         enc.bitrate_bps = 32_000;
         enc.use_inband_fec = true;
         enc.packet_loss_perc = 10;
-        Self { apm_key, acc: Vec::with_capacity(F20 * 2), frame20: Vec::with_capacity(F20), enc, samples_sent: 0, pkt: vec![0; 1500] }
+        Self {
+            apm_key,
+            acc: Vec::with_capacity(F20 * 2),
+            frame20: Vec::with_capacity(F20),
+            enc,
+            samples_sent: 0,
+            pkt: vec![0; 1500],
+        }
     }
 
     /// Feed PCM; returns encoded 20 ms Opus packets with their start sample.
@@ -296,13 +315,20 @@ pub(crate) struct AudioReceiver {
 
 impl AudioReceiver {
     pub(crate) fn new() -> Self {
-        Self { dec: OpusDecoder::new(SR as i32, 1).expect("Opus decoder"), pcm: vec![0f32; 5760], packets: 0, concealed: 0 }
+        Self {
+            dec: OpusDecoder::new(SR as i32, 1).expect("Opus decoder"),
+            pcm: vec![0f32; 5760],
+            packets: 0,
+            concealed: 0,
+        }
     }
 
     /// Decode one packet. When the previous packet was lost (`contiguous ==
     /// false`), first recover it from this packet's in-band FEC (or PLC).
     pub(crate) fn decode(&mut self, packet: &[u8], contiguous: bool) -> Vec<f32> {
-        let Some(n) = opus_packet_samples(packet) else { return Vec::new() };
+        let Some(n) = opus_packet_samples(packet) else {
+            return Vec::new();
+        };
         let mut out = Vec::with_capacity(n * 2);
         if !contiguous && self.packets > 0 {
             if let Ok(m) = self.dec.decode_fec(packet, n, &mut self.pcm) {
@@ -333,7 +359,9 @@ mod tests {
     }
 
     fn tone(freq: f32, n: usize, amp: f32) -> Vec<f32> {
-        (0..n).map(|i| amp * (2.0 * std::f32::consts::PI * freq * i as f32 / SR as f32).sin()).collect()
+        (0..n)
+            .map(|i| amp * (2.0 * std::f32::consts::PI * freq * i as f32 / SR as f32).sin())
+            .collect()
     }
 
     #[test]
@@ -347,7 +375,9 @@ mod tests {
         for (_, pkt) in tx.push(&hub, &pcm) {
             dec.extend(rx.decode(&pkt, true));
         }
-        let rms = (dec[F20 * 10..].iter().map(|v| v * v).sum::<f32>() / (dec.len() - F20 * 10) as f32).sqrt();
+        let rms = (dec[F20 * 10..].iter().map(|v| v * v).sum::<f32>()
+            / (dec.len() - F20 * 10) as f32)
+            .sqrt();
         assert!(rms > 0.15, "decoded tone rms {rms}");
     }
 
@@ -358,9 +388,17 @@ mod tests {
             .map(|i| {
                 let t = i as f32 / SR as f32;
                 let syll = (t * 3.1).fract();
-                let gate = if syll < 0.65 { (syll / 0.65 * std::f32::consts::PI).sin() } else { 0.0 };
-                phase += 2.0 * std::f32::consts::PI * base * (1.0 + 0.25 * (t * 1.7).sin()) / SR as f32;
-                0.25 * gate * (1..6).map(|h| (phase * h as f32).sin() / h as f32).sum::<f32>()
+                let gate = if syll < 0.65 {
+                    (syll / 0.65 * std::f32::consts::PI).sin()
+                } else {
+                    0.0
+                };
+                phase +=
+                    2.0 * std::f32::consts::PI * base * (1.0 + 0.25 * (t * 1.7).sin()) / SR as f32;
+                0.25 * gate
+                    * (1..6)
+                        .map(|h| (phase * h as f32).sin() / h as f32)
+                        .sum::<f32>()
             })
             .collect()
     }
@@ -378,7 +416,11 @@ mod tests {
             let mut cap = [0f32; F10];
             for (i, c) in cap.iter_mut().enumerate() {
                 let k = f * F10 + i;
-                *c = if k >= delay + 48 { 0.5 * far[k - delay] + 0.2 * far[k - delay - 48] } else { 0.0 };
+                *c = if k >= delay + 48 {
+                    0.5 * far[k - delay] + 0.2 * far[k - delay - 48]
+                } else {
+                    0.0
+                };
             }
             let before = cap;
             hub.capture(7, &mut cap);
@@ -393,8 +435,16 @@ mod tests {
     /// Production config (AEC3 + NS) removes a 60 ms room echo.
     #[test]
     fn apm_cancels_echo() {
-        let full = erle(CaptureProcessing { echo_cancellation: true, noise_suppression: true, auto_gain_control: false });
-        let aec_only = erle(CaptureProcessing { echo_cancellation: true, noise_suppression: false, auto_gain_control: false });
+        let full = erle(CaptureProcessing {
+            echo_cancellation: true,
+            noise_suppression: true,
+            auto_gain_control: false,
+        });
+        let aec_only = erle(CaptureProcessing {
+            echo_cancellation: true,
+            noise_suppression: false,
+            auto_gain_control: false,
+        });
         eprintln!("ERLE: AEC3+NS {full:.1} dB, AEC3 alone {aec_only:.1} dB");
         assert!(full > 20.0, "ERLE {full:.1} dB");
         assert!(aec_only > 20.0, "AEC3 alone {aec_only:.1} dB");

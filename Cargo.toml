@@ -11,7 +11,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 log.workspace = true
-str0m = { version = "0.24", default-features = false, features = ["rust-crypto"] }
+# Vendored 0.24.0 with one patch (VP8 PictureID, needed by SFUs); see vendor/str0m/PATCHES.md.
+str0m = { path = "../../vendor/str0m", version = "0.24", default-features = false, features = ["rust-crypto"] }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
 if-addrs = "0.13"
 rand = "0.9"

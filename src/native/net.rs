@@ -34,7 +34,11 @@ pub(crate) fn bind_host_sockets() -> std::io::Result<Vec<HostSocket>> {
         .filter(usable)
         .collect();
     if ips.is_empty() {
-        ips = addrs.iter().filter(|a| a.is_loopback()).map(|a| a.ip()).collect();
+        ips = addrs
+            .iter()
+            .filter(|a| a.is_loopback())
+            .map(|a| a.ip())
+            .collect();
     }
     ips.sort();
     ips.dedup();
@@ -50,7 +54,10 @@ pub(crate) fn bind_host_sockets() -> std::io::Result<Vec<HostSocket>> {
         std_sock.set_nonblocking(true)?;
         let local = std_sock.local_addr()?;
         let socket = UdpSocket::from_std(std_sock)?;
-        out.push(HostSocket { socket: Arc::new(socket), local });
+        out.push(HostSocket {
+            socket: Arc::new(socket),
+            local,
+        });
     }
     Ok(out)
 }

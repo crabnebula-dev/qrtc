@@ -26,7 +26,11 @@ pub(crate) struct Section {
 
 impl Section {
     pub(crate) fn stream_ids(&self) -> Vec<String> {
-        self.msids.iter().map(|(s, _)| s.clone()).filter(|s| s != "-").collect()
+        self.msids
+            .iter()
+            .map(|(s, _)| s.clone())
+            .filter(|s| s != "-")
+            .collect()
     }
     pub(crate) fn track_id(&self) -> Option<String> {
         self.msids.first().map(|(_, t)| t.clone())
@@ -60,7 +64,10 @@ fn dir_attr(line: &str) -> Option<Direction> {
 
 pub(crate) fn parse(sdp: &str) -> Vec<Section> {
     let (session, sections) = split(sdp);
-    let session_dir = session.iter().find_map(|l| dir_attr(l)).unwrap_or(Direction::Sendrecv);
+    let session_dir = session
+        .iter()
+        .find_map(|l| dir_attr(l))
+        .unwrap_or(Direction::Sendrecv);
     sections
         .into_iter()
         .map(|lines| {
@@ -73,7 +80,13 @@ pub(crate) fn parse(sdp: &str) -> Vec<Section> {
                 _ => SectionKind::Other,
             };
             let port_zero = parts.next() == Some("0");
-            let mut sec = Section { kind, mid: None, direction: session_dir, msids: Vec::new(), port_zero };
+            let mut sec = Section {
+                kind,
+                mid: None,
+                direction: session_dir,
+                msids: Vec::new(),
+                port_zero,
+            };
             for l in &lines[1..] {
                 if let Some(mid) = l.strip_prefix("a=mid:") {
                     sec.mid = Some(mid.to_string());
@@ -82,7 +95,8 @@ pub(crate) fn parse(sdp: &str) -> Vec<Section> {
                 } else if let Some(v) = l.strip_prefix("a=msid:") {
                     let mut it = v.split_whitespace();
                     if let Some(stream) = it.next() {
-                        sec.msids.push((stream.to_string(), it.next().unwrap_or("").to_string()));
+                        sec.msids
+                            .push((stream.to_string(), it.next().unwrap_or("").to_string()));
                     }
                 }
             }
@@ -104,7 +118,10 @@ pub(crate) fn rewrite(sdp: &str, mut f: impl FnMut(&str) -> Option<Rewrite>) -> 
     let mut out: Vec<String> = session.iter().map(|s| s.to_string()).collect();
     for lines in sections {
         let is_media = lines[0].starts_with("m=audio") || lines[0].starts_with("m=video");
-        let mid = lines.iter().find_map(|l| l.strip_prefix("a=mid:")).map(str::to_string);
+        let mid = lines
+            .iter()
+            .find_map(|l| l.strip_prefix("a=mid:"))
+            .map(str::to_string);
         let rw = match (is_media, mid.as_deref()) {
             (true, Some(mid)) => f(mid),
             _ => None,
@@ -169,13 +186,22 @@ m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\na=mid:2\r\n";
     #[test]
     fn rewrites_direction_and_msid() {
         let out = rewrite(SDP, |mid| match mid {
-            "0" => Some(Rewrite { direction: Direction::Sendonly, msid: Some((vec!["page-stream".into()], "page-track".into())) }),
-            "1" => Some(Rewrite { direction: Direction::Inactive, msid: None }),
+            "0" => Some(Rewrite {
+                direction: Direction::Sendonly,
+                msid: Some((vec!["page-stream".into()], "page-track".into())),
+            }),
+            "1" => Some(Rewrite {
+                direction: Direction::Inactive,
+                msid: None,
+            }),
             _ => None,
         });
         let s = parse(&out);
         assert_eq!(s[0].direction, Direction::Sendonly);
-        assert_eq!(s[0].msids, vec![("page-stream".to_string(), "page-track".to_string())]);
+        assert_eq!(
+            s[0].msids,
+            vec![("page-stream".to_string(), "page-track".to_string())]
+        );
         assert!(!out.contains("a=ssrc:1 msid"));
         assert!(out.contains("a=ssrc:1 cname:x"));
         assert_eq!(s[1].direction, Direction::Inactive);

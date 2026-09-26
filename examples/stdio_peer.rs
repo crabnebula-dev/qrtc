@@ -62,7 +62,9 @@ fn main() {
     *peer.lock().unwrap() = Some(p.clone());
 
     if offerer {
-        let info = p.create_data_channel("engine", &DataChannelInit::default()).unwrap();
+        let info = p
+            .create_data_channel("engine", &DataChannelInit::default())
+            .unwrap();
         out(json!({"op":"dc.created","channel":info}));
         let offer = p.create_offer().unwrap();
         p.set_local_description(&offer).unwrap();
@@ -71,18 +73,26 @@ fn main() {
 
     for line in std::io::stdin().lock().lines() {
         let Ok(line) = line else { break };
-        let Ok(v) = serde_json::from_str::<Value>(&line) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
         let r: Result<()> = (|| {
             match v["op"].as_str() {
                 Some("offer") => {
-                    let d = SessionDescription { kind: SdpType::Offer, sdp: v["sdp"].as_str().unwrap_or_default().into() };
+                    let d = SessionDescription {
+                        kind: SdpType::Offer,
+                        sdp: v["sdp"].as_str().unwrap_or_default().into(),
+                    };
                     p.set_remote_description(&d)?;
                     let answer = p.create_answer()?;
                     p.set_local_description(&answer)?;
                     out(json!({"op":"answer","sdp":answer.sdp}));
                 }
                 Some("answer") => {
-                    let d = SessionDescription { kind: SdpType::Answer, sdp: v["sdp"].as_str().unwrap_or_default().into() };
+                    let d = SessionDescription {
+                        kind: SdpType::Answer,
+                        sdp: v["sdp"].as_str().unwrap_or_default().into(),
+                    };
                     p.set_remote_description(&d)?;
                 }
                 Some("candidate") => {

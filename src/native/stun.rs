@@ -81,7 +81,11 @@ fn hmac_sha1(key: &[u8], data: &[u8]) -> [u8; 20] {
 
 impl Message {
     pub(crate) fn new(typ: u16) -> Self {
-        Self { typ, tid: new_tid(), attrs: Vec::new() }
+        Self {
+            typ,
+            tid: new_tid(),
+            attrs: Vec::new(),
+        }
     }
 
     pub(crate) fn attr(mut self, t: u16, v: impl Into<Vec<u8>>) -> Self {
@@ -90,7 +94,10 @@ impl Message {
     }
 
     pub(crate) fn get(&self, t: u16) -> Option<&[u8]> {
-        self.attrs.iter().find(|(k, _)| *k == t).map(|(_, v)| v.as_slice())
+        self.attrs
+            .iter()
+            .find(|(k, _)| *k == t)
+            .map(|(_, v)| v.as_slice())
     }
 
     pub(crate) fn get_str(&self, t: u16) -> Option<String> {
@@ -168,7 +175,10 @@ impl Message {
 
     /// Check MESSAGE-INTEGRITY of a raw message with the given key.
     pub(crate) fn verify(buf: &[u8], key: &[u8]) -> bool {
-        let Some(msg_len) = buf.get(2..4).map(|b| u16::from_be_bytes([b[0], b[1]]) as usize) else {
+        let Some(msg_len) = buf
+            .get(2..4)
+            .map(|b| u16::from_be_bytes([b[0], b[1]]) as usize)
+        else {
             return false;
         };
         let mut p = 20;
@@ -176,7 +186,9 @@ impl Message {
             let t = u16::from_be_bytes([buf[p], buf[p + 1]]);
             let l = u16::from_be_bytes([buf[p + 2], buf[p + 3]]) as usize;
             if t == ATTR_MESSAGE_INTEGRITY {
-                let Some(expected) = buf.get(p + 4..p + 24) else { return false };
+                let Some(expected) = buf.get(p + 4..p + 24) else {
+                    return false;
+                };
                 let mut copy = buf[..p].to_vec();
                 let len = (p - 20 + 24) as u16;
                 copy[2..4].copy_from_slice(&len.to_be_bytes());
@@ -289,7 +301,10 @@ mod tests {
             .attr(ATTR_NONCE, "abc");
         let bytes = m.encode(Some(&key), true);
         assert!(Message::verify(&bytes, &key));
-        assert!(!Message::verify(&bytes, &long_term_key("user", "realm", "nope")));
+        assert!(!Message::verify(
+            &bytes,
+            &long_term_key("user", "realm", "nope")
+        ));
         let back = Message::decode(&bytes).unwrap();
         assert_eq!(back.typ, ALLOCATE_REQUEST);
         assert_eq!(back.get_str(ATTR_NONCE).as_deref(), Some("abc"));
@@ -304,7 +319,11 @@ mod tests {
     /// exercised against coturn in the TURN interop test.
     #[test]
     fn long_term_key_md5() {
-        let k = long_term_key("\u{30DE}\u{30C8}\u{30EA}\u{30C3}\u{30AF}\u{30B9}", "example.org", "TheMatrIX");
+        let k = long_term_key(
+            "\u{30DE}\u{30C8}\u{30EA}\u{30C3}\u{30AF}\u{30B9}",
+            "example.org",
+            "TheMatrIX",
+        );
         let hex: String = k.iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(hex, "e8ca7ad59d5eb0518e312911d2dab2a9");
     }
@@ -312,9 +331,15 @@ mod tests {
     #[test]
     fn xor_addresses() {
         let tid = new_tid();
-        for a in ["192.0.2.1:32853", "[2001:db8:1234:5678:11:2233:4455:6677]:32853"] {
+        for a in [
+            "192.0.2.1:32853",
+            "[2001:db8:1234:5678:11:2233:4455:6677]:32853",
+        ] {
             let addr: SocketAddr = a.parse().unwrap();
-            assert_eq!(decode_xor_addr(&encode_xor_addr(addr, &tid), &tid), Some(addr));
+            assert_eq!(
+                decode_xor_addr(&encode_xor_addr(addr, &tid), &tid),
+                Some(addr)
+            );
         }
     }
 
