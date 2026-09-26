@@ -408,6 +408,16 @@ pub trait Peer: Send + Sync {
     /// remote Opus before decode. Video is encoded and decoded in the page, so
     /// only audio needs this.
     fn set_transform(&self, tx: TxId, send: bool, recv: bool) -> Result<()>;
+    /// Capture processing for an audio sender, from its track's settings.
+    /// Browsers process microphone tracks only; a WebAudio or file track goes
+    /// out untouched.
+    fn set_audio_processing(
+        &self,
+        tx: TxId,
+        echo_cancellation: bool,
+        noise_suppression: bool,
+        auto_gain_control: bool,
+    ) -> Result<()>;
     /// Decode a (transformed) received Opus frame into the playout.
     fn decode_audio(&self, tx: TxId, data: Vec<u8>) -> Result<()>;
     fn local_description(&self) -> Option<SessionDescription>;

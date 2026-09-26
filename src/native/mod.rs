@@ -15,6 +15,7 @@ mod stun;
 mod turn;
 
 use crate::*;
+use audio::CaptureProcessing;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use tokio::sync::{mpsc, oneshot};
@@ -100,6 +101,7 @@ pub(crate) enum Cmd {
     RestartIce,
     Pcm(TxId, Vec<i16>),
     Transform(TxId, bool, bool),
+    AudioProcessing(TxId, CaptureProcessing),
     DecodeAudio(TxId, Vec<u8>),
     AddIce(IceCandidate, Reply<()>),
     CreateDc(String, DataChannelInit, Reply<DataChannelInfo>),
@@ -165,6 +167,21 @@ impl Peer for NativePeer {
     }
     fn set_transform(&self, tx: TxId, send: bool, recv: bool) -> Result<()> {
         let _ = self.tx.send(Cmd::Transform(tx, send, recv));
+        Ok(())
+    }
+    fn set_audio_processing(
+        &self,
+        tx: TxId,
+        echo_cancellation: bool,
+        noise_suppression: bool,
+        auto_gain_control: bool,
+    ) -> Result<()> {
+        let p = CaptureProcessing {
+            echo_cancellation,
+            noise_suppression,
+            auto_gain_control,
+        };
+        let _ = self.tx.send(Cmd::AudioProcessing(tx, p));
         Ok(())
     }
     fn decode_audio(&self, tx: TxId, data: Vec<u8>) -> Result<()> {

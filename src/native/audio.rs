@@ -381,6 +381,36 @@ mod tests {
         assert!(rms > 0.15, "decoded tone rms {rms}");
     }
 
+    /// Without processing (a WebAudio or file track), the level goes out as it came in.
+    #[test]
+    fn unprocessed_capture_keeps_level() {
+        for apm in [false, true] {
+            let hub = AudioHub::default();
+            if apm {
+                hub.add_apm(
+                    1,
+                    CaptureProcessing {
+                        echo_cancellation: false,
+                        noise_suppression: false,
+                        auto_gain_control: false,
+                    },
+                );
+            }
+            let mut tx = AudioSender::new(1);
+            let mut rx = AudioReceiver::new();
+            let sig = tone(440.0, SR * 2, 0.3);
+            let pcm: Vec<i16> = sig.iter().map(|s| (s * 32767.0) as i16).collect();
+            let mut dec = Vec::new();
+            for (_, pkt) in tx.push(&hub, &pcm) {
+                dec.extend(rx.decode(&pkt, true));
+            }
+            let tail = &dec[F20 * 20..];
+            let rms = (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt();
+            eprintln!("apm registered {apm}: rms {rms:.3} (source 0.212)");
+            assert!((rms - 0.212).abs() < 0.03, "level changed: {rms}");
+        }
+    }
+
     /// Speech-like test signal: gated harmonic bursts with a gliding pitch.
     fn speechish(n: usize, base: f32) -> Vec<f32> {
         let mut phase = 0f32;
@@ -448,7 +478,9 @@ mod tests {
     fn clean_near_end(p: CaptureProcessing) -> (f64, f64) {
         let hub = AudioHub::default();
         hub.add_apm(9, p);
-        let tone = |hz: f32, i: usize| 0.3 * (2.0 * std::f32::consts::PI * hz * i as f32 / SR as f32).sin();
+        let tone = |hz: f32, i: usize| {
+            0.3 * (2.0 * std::f32::consts::PI * hz * i as f32 / SR as f32).sin()
+        };
         let (mut inp, mut out) = (Vec::new(), Vec::new());
         for f in 0..(SR * 6) / F10 {
             let mut r = [0f32; F10];
@@ -478,13 +510,30 @@ mod tests {
     #[test]
     fn apm_does_not_inject_far_end() {
         for (name, p) in [
-            ("AEC3+NS", CaptureProcessing { echo_cancellation: true, noise_suppression: true, auto_gain_control: false }),
-            ("AEC3", CaptureProcessing { echo_cancellation: true, noise_suppression: false, auto_gain_control: false }),
+            (
+                "AEC3+NS",
+                CaptureProcessing {
+                    echo_cancellation: true,
+                    noise_suppression: true,
+                    auto_gain_control: false,
+                },
+            ),
+            (
+                "AEC3",
+                CaptureProcessing {
+                    echo_cancellation: true,
+                    noise_suppression: false,
+                    auto_gain_control: false,
+                },
+            ),
             ("default", CaptureProcessing::default()),
         ] {
             let (kept, leaked) = clean_near_end(p);
             eprintln!("{name}: near-end {kept:.1} dB, far-end leak {leaked:.1} dB");
-            assert!(leaked < -40.0, "{name}: far-end leaks into capture at {leaked:.1} dB");
+            assert!(
+                leaked < -40.0,
+                "{name}: far-end leaks into capture at {leaked:.1} dB"
+            );
         }
     }
 

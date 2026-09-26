@@ -289,6 +289,8 @@ pub(crate) struct Driver {
     audio_receivers: HashMap<TxId, AudioReceiver>,
     /// Transceivers whose engine-side Opus goes through the page's transform.
     transform_send: HashSet<TxId>,
+    /// Capture processing per audio sender (default: full, as for a microphone).
+    audio_processing: HashMap<TxId, CaptureProcessing>,
     transform_recv: HashSet<TxId>,
     bwe_desired_set: bool,
 }
@@ -418,6 +420,7 @@ impl Driver {
             audio_senders: HashMap::new(),
             audio_receivers: HashMap::new(),
             transform_send: HashSet::new(),
+            audio_processing: HashMap::new(),
             transform_recv: HashSet::new(),
             bwe_desired_set: false,
         };
@@ -621,6 +624,12 @@ impl Driver {
             Cmd::RequestKeyframe(tx) => self.request_keyframe(tx),
             Cmd::RestartIce => self.ice_restart = true,
             Cmd::Pcm(tx, samples) => self.push_pcm(tx, samples),
+            Cmd::AudioProcessing(tx, p) => {
+                self.audio_processing.insert(tx, p);
+                if self.audio_senders.contains_key(&tx) {
+                    self.audio.add_apm((self.uid << 32) | tx as u64, p);
+                }
+            }
             Cmd::Transform(tx, send, recv) => {
                 if send {
                     self.transform_send.insert(tx);
@@ -1154,8 +1163,9 @@ impl Driver {
     fn push_pcm(&mut self, tx: TxId, samples: Vec<i16>) {
         let key = (self.uid << 32) | tx as u64;
         let audio = self.audio.clone();
+        let processing = self.audio_processing.get(&tx).copied().unwrap_or_default();
         let sender = self.audio_senders.entry(tx).or_insert_with(|| {
-            audio.add_apm(key, CaptureProcessing::default());
+            audio.add_apm(key, processing);
             AudioSender::new(key)
         });
         let packets = sender.push(&audio, &samples);
