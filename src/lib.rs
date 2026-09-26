@@ -327,6 +327,10 @@ pub enum PeerEvent {
     /// Encoded media received on a transceiver. Raw path, not serialised.
     #[serde(skip)]
     MediaFrame(EncodedFrame),
+    /// Decoded 48 kHz mono PCM for a receiver's playout, 20 ms per event.
+    /// Raw path, not serialised.
+    #[serde(skip)]
+    AudioPcm { tx: TxId, samples: Vec<i16> },
 }
 
 /// Receives engine events. Called from engine threads.
@@ -353,6 +357,9 @@ pub trait Peer: Send + Sync {
     fn request_keyframe(&self, tx: TxId) -> Result<()>;
     /// `restartIce()`: the next offer restarts ICE.
     fn restart_ice(&self) -> Result<()>;
+    /// Captured 48 kHz mono PCM for an audio sender (non-blocking). The engine
+    /// runs echo cancellation, noise suppression and AGC, then encodes Opus.
+    fn push_pcm(&self, tx: TxId, samples: Vec<i16>) -> Result<()>;
     fn local_description(&self) -> Option<SessionDescription>;
     fn remote_description(&self) -> Option<SessionDescription>;
     fn add_ice_candidate(&self, candidate: &IceCandidate) -> Result<()>;

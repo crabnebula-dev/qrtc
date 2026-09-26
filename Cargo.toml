@@ -20,6 +20,8 @@ sha1 = "0.10"
 md-5 = "0.10"
 crc32fast = "1"
 tracing = { version = "0.1", features = ["log"] }
+rusty-opus = "0.9"
+sonora = "0.2"
 socket2 = { version = "0.6", features = ["all"] }
 
 [dev-dependencies]

@@ -2,6 +2,7 @@
 //! channel queues. Every mutation of the `Rtc` is followed by [`Driver::drain`].
 
 use super::net::{bind_host_sockets, HostSocket};
+use super::audio::{AudioHub, AudioReceiver, AudioSender, CaptureProcessing};
 use super::jsep;
 use super::stun::{self, Message, TransId};
 use super::turn::{TurnClient, TurnEvent};
@@ -260,6 +261,10 @@ pub(crate) struct Driver {
     raw_answer: Option<String>,
     buffered_candidates: Vec<String>,
     ice_restart: bool,
+    audio: Arc<AudioHub>,
+    uid: u64,
+    audio_senders: HashMap<TxId, AudioSender>,
+    audio_receivers: HashMap<TxId, AudioReceiver>,
 }
 
 fn norm(sdp: &str) -> String {
@@ -275,7 +280,13 @@ fn op<E: std::fmt::Display>(what: &'static str) -> impl FnOnce(E) -> Error {
 }
 
 impl Driver {
-    pub(crate) fn new(config: RtcConfiguration, events: EventSink, shared: Arc<Shared>) -> Result<Self> {
+    pub(crate) fn new(
+        config: RtcConfiguration,
+        events: EventSink,
+        shared: Arc<Shared>,
+        audio: Arc<AudioHub>,
+        uid: u64,
+    ) -> Result<Self> {
         let now = Instant::now();
         let relay_only = config.ice_transport_policy.as_deref() == Some("relay");
         // Offer what the page can encode and decode: Opus (engine) and VP8
@@ -330,6 +341,10 @@ impl Driver {
             raw_answer: None,
             buffered_candidates: Vec::new(),
             ice_restart: false,
+            audio,
+            uid,
+            audio_senders: HashMap::new(),
+            audio_receivers: HashMap::new(),
         };
         for s in d.sockets.iter().filter(|_| !relay_only) {
             match Candidate::host(s.local, "udp") {
@@ -405,6 +420,7 @@ impl Driver {
         for r in readers {
             r.abort();
         }
+        self.audio.remove_pc(self.uid);
         log::debug!("peer connection driver stopped");
     }
 
@@ -516,6 +532,7 @@ impl Driver {
             Cmd::SendFrame(f) => self.send_frame(f),
             Cmd::RequestKeyframe(tx) => self.request_keyframe(tx),
             Cmd::RestartIce => self.ice_restart = true,
+            Cmd::Pcm(tx, samples) => self.push_pcm(tx, samples),
             Cmd::SetLocal(d, r) => {
                 let _ = r.send(self.set_local(d));
             }
@@ -925,6 +942,25 @@ impl Driver {
             log::debug!("write {mid}: {e}");
         }
         self.drain();
+    }
+
+    fn push_pcm(&mut self, tx: TxId, samples: Vec<i16>) {
+        let key = (self.uid << 32) | tx as u64;
+        let audio = self.audio.clone();
+        let sender = self.audio_senders.entry(tx).or_insert_with(|| {
+            audio.add_apm(key, CaptureProcessing::default());
+            AudioSender::new(key)
+        });
+        let packets = sender.push(&audio, &samples);
+        for (start, data) in packets {
+            self.send_frame(EncodedFrame {
+                tx,
+                codec: CodecName::Opus,
+                keyframe: true,
+                timestamp_us: start * 1000 / 48,
+                data: data.into(),
+            });
+        }
     }
 
     fn request_keyframe(&mut self, tx: TxId) {
@@ -1444,6 +1480,16 @@ impl Driver {
                     (_, CodecName::Opus) => true,
                     _ => false,
                 };
+                if codec == CodecName::Opus {
+                    let key = (self.uid, tx);
+                    let rx = self.audio_receivers.entry(tx).or_insert_with(AudioReceiver::new);
+                    let pcm = rx.decode(&d.data, d.contiguous);
+                    if rx.packets == 1 {
+                        self.audio.add_playout(key, self.events.clone());
+                    }
+                    self.audio.push_playout(key, &pcm);
+                    return;
+                }
                 if !d.contiguous && codec.kind() == TrackKind::Video {
                     self.request_keyframe(tx);
                 }
@@ -1503,6 +1549,20 @@ impl Driver {
                 out.insert("LC".into(), json!({"type": "local-candidate", "id": "LC", "address": p.local.addr.ip().to_string(), "port": p.local.addr.port()}));
                 out.insert("RC".into(), json!({"type": "remote-candidate", "id": "RC", "address": p.remote.addr.ip().to_string(), "port": p.remote.addr.port()}));
             }
+        }
+        for (tx, rx) in &self.audio_receivers {
+            let (depth, underruns, trimmed, target) = self.audio.playout_stats((self.uid, *tx)).unwrap_or_default();
+            out.insert(
+                format!("AIN{tx}"),
+                json!({"type": "engine-audio-in", "id": format!("AIN{tx}"), "tx": tx, "packetsReceived": rx.packets,
+                       "concealedPackets": rx.concealed, "jitterBufferFrames": depth, "jitterTargetFrames": target, "underruns": underruns, "trimmedFrames": trimmed}),
+            );
+        }
+        for (tx, s) in &self.audio_senders {
+            out.insert(
+                format!("AOUT{tx}"),
+                json!({"type": "engine-audio-out", "id": format!("AOUT{tx}"), "tx": tx, "samplesEncoded": s.samples_sent}),
+            );
         }
         serde_json::Value::Object(out)
     }

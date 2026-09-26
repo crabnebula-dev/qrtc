@@ -6,6 +6,7 @@
 //! so str0m's single-mutation invariant is upheld in exactly one place.
 //! [`NativePeer`] is a cheap handle that sends commands to the driver.
 
+mod audio;
 mod driver;
 mod jsep;
 mod mdns;
@@ -21,6 +22,8 @@ use tokio::sync::{mpsc, oneshot};
 /// Engine that creates pure Rust peer connections.
 pub struct NativeEngine {
     rt: tokio::runtime::Runtime,
+    audio: Arc<audio::AudioHub>,
+    next_uid: std::sync::atomic::AtomicU64,
 }
 
 impl NativeEngine {
@@ -34,7 +37,9 @@ impl NativeEngine {
             .enable_all()
             .build()
             .map_err(|e| Error::NotSupported(format!("engine runtime: {e}")))?;
-        Ok(Self { rt })
+        let audio = audio::AudioHub::new();
+        audio.start_clock(&rt);
+        Ok(Self { rt, audio, next_uid: std::sync::atomic::AtomicU64::new(1) })
     }
 }
 
@@ -48,7 +53,8 @@ impl PeerEngine for NativeEngine {
         let (tx, rx) = mpsc::unbounded_channel();
         let driver = {
             let _guard = self.rt.enter();
-            driver::Driver::new(config.clone(), events, shared.clone())?
+            let uid = self.next_uid.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            driver::Driver::new(config.clone(), events, shared.clone(), self.audio.clone(), uid)?
         };
         self.rt.spawn(driver.run(rx));
         Ok(Box::new(NativePeer { tx, shared }))
@@ -80,6 +86,7 @@ pub(crate) enum Cmd {
     SendFrame(EncodedFrame),
     RequestKeyframe(TxId),
     RestartIce,
+    Pcm(TxId, Vec<i16>),
     AddIce(IceCandidate, Reply<()>),
     CreateDc(String, DataChannelInit, Reply<DataChannelInfo>),
     DcSend(DcHandle, Payload),
@@ -136,6 +143,11 @@ impl Peer for NativePeer {
     fn restart_ice(&self) -> Result<()> {
         let _ = self.tx.send(Cmd::RestartIce);
         Ok(())
+    }
+    fn push_pcm(&self, tx: TxId, samples: Vec<i16>) -> Result<()> {
+        self.tx
+            .send(Cmd::Pcm(tx, samples))
+            .map_err(|_| Error::InvalidState("peer connection is closed".into()))
     }
     fn local_description(&self) -> Option<SessionDescription> {
         None
