@@ -3,7 +3,7 @@
 //! `stdio_peer answerer`: waits for `{"op":"offer"}`, answers, echoes every
 //! data channel message back on the same channel.
 //! `stdio_peer offerer`: creates channel "engine" and an offer, then sends
-//! `hello from webrtcbin` once it opens, and echoes like the answerer.
+//! `hello from engine` once it opens, and echoes like the answerer.
 
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -47,7 +47,7 @@ fn main() {
             out(json!({"op":"dc.open","handle":handle,"id":id}));
             if offerer {
                 if let Some(p) = echo_peer.lock().unwrap().clone() {
-                    let _ = p.dc_send(handle, Payload::Text("hello from webrtcbin".into()));
+                    let _ = p.dc_send(handle, Payload::Text("hello from engine".into()));
                 }
             }
         }

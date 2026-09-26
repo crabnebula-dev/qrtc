@@ -432,6 +432,62 @@ mod tests {
         10.0 * (in_e / out_e.max(1e-12)).log10()
     }
 
+    fn goertzel(x: &[f32], hz: f32) -> f64 {
+        let w = 2.0 * std::f64::consts::PI * hz as f64 / SR as f64;
+        let (mut s1, mut s2) = (0f64, 0f64);
+        for &v in x {
+            let s0 = v as f64 + 2.0 * w.cos() * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        (s1 * s1 + s2 * s2 - 2.0 * w.cos() * s1 * s2).max(1e-18)
+    }
+
+    /// Returns (near-end kept dB, far-end leaked dB) of the capture output,
+    /// relative to the near-end tone going in. No echo path: a headset.
+    fn clean_near_end(p: CaptureProcessing) -> (f64, f64) {
+        let hub = AudioHub::default();
+        hub.add_apm(9, p);
+        let tone = |hz: f32, i: usize| 0.3 * (2.0 * std::f32::consts::PI * hz * i as f32 / SR as f32).sin();
+        let (mut inp, mut out) = (Vec::new(), Vec::new());
+        for f in 0..(SR * 6) / F10 {
+            let mut r = [0f32; F10];
+            for (i, v) in r.iter_mut().enumerate() {
+                *v = tone(660.0, f * F10 + i);
+            }
+            hub.render_direct(&r);
+            let mut cap = [0f32; F10];
+            for (i, v) in cap.iter_mut().enumerate() {
+                *v = tone(440.0, f * F10 + i);
+            }
+            let before = cap;
+            hub.capture(9, &mut cap);
+            if f * F10 >= SR * 4 {
+                inp.extend_from_slice(&before);
+                out.extend_from_slice(&cap);
+            }
+        }
+        let near_in = goertzel(&inp, 440.0);
+        let kept = 10.0 * (goertzel(&out, 440.0) / near_in).log10();
+        let leaked = 10.0 * (goertzel(&out, 660.0) / near_in).log10();
+        (kept, leaked)
+    }
+
+    /// With no echo in the microphone, the far end must not appear in what we
+    /// send (it would play back to the remote as their own voice).
+    #[test]
+    fn apm_does_not_inject_far_end() {
+        for (name, p) in [
+            ("AEC3+NS", CaptureProcessing { echo_cancellation: true, noise_suppression: true, auto_gain_control: false }),
+            ("AEC3", CaptureProcessing { echo_cancellation: true, noise_suppression: false, auto_gain_control: false }),
+            ("default", CaptureProcessing::default()),
+        ] {
+            let (kept, leaked) = clean_near_end(p);
+            eprintln!("{name}: near-end {kept:.1} dB, far-end leak {leaked:.1} dB");
+            assert!(leaked < -40.0, "{name}: far-end leaks into capture at {leaked:.1} dB");
+        }
+    }
+
     /// Production config (AEC3 + NS) removes a 60 ms room echo.
     #[test]
     fn apm_cancels_echo() {
