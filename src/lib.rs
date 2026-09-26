@@ -148,6 +148,147 @@ pub struct DataChannelInfo {
     pub max_retransmits: Option<u16>,
 }
 
+/// Transceiver handle. The JS shim allocates ids for transceivers it
+/// creates; the engine allocates ids at or above [`REMOTE_TX_BASE`] for
+/// transceivers created by a remote offer.
+pub type TxId = u32;
+pub const REMOTE_TX_BASE: TxId = 0x8000_0000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrackKind {
+    Audio,
+    Video,
+}
+
+/// W3C `RTCRtpTransceiverDirection`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Direction {
+    Sendrecv,
+    Sendonly,
+    Recvonly,
+    Inactive,
+    Stopped,
+}
+
+impl Direction {
+    pub fn sends(self) -> bool {
+        matches!(self, Direction::Sendrecv | Direction::Sendonly)
+    }
+    pub fn recvs(self) -> bool {
+        matches!(self, Direction::Sendrecv | Direction::Recvonly)
+    }
+    pub fn from_flags(send: bool, recv: bool) -> Self {
+        match (send, recv) {
+            (true, true) => Direction::Sendrecv,
+            (true, false) => Direction::Sendonly,
+            (false, true) => Direction::Recvonly,
+            (false, false) => Direction::Inactive,
+        }
+    }
+    /// The same m-line seen from the other side.
+    pub fn invert(self) -> Self {
+        match self {
+            Direction::Sendonly => Direction::Recvonly,
+            Direction::Recvonly => Direction::Sendonly,
+            d => d,
+        }
+    }
+    pub fn as_sdp(self) -> &'static str {
+        match self {
+            Direction::Sendrecv => "sendrecv",
+            Direction::Sendonly => "sendonly",
+            Direction::Recvonly => "recvonly",
+            Direction::Inactive | Direction::Stopped => "inactive",
+        }
+    }
+}
+
+/// What the JS side knows about one of its transceivers. Sent whole on
+/// every change; the engine treats it as an upsert.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransceiverSpec {
+    pub id: TxId,
+    pub kind: TrackKind,
+    pub direction: Direction,
+    #[serde(default)]
+    pub stream_ids: Vec<String>,
+    /// Stable msid track id of the sender (W3C: sender's track id at creation).
+    pub sender_track_id: String,
+    /// Created by `addTrack` (eligible for association with remote m-lines).
+    #[serde(default)]
+    pub from_add_track: bool,
+    #[serde(default)]
+    pub stopped: bool,
+}
+
+/// Negotiation facts the JS side needs to update transceivers and fire
+/// `track` / `removetrack` per the W3C algorithms.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransceiverState {
+    pub id: TxId,
+    pub kind: TrackKind,
+    pub mid: Option<String>,
+    pub direction: Direction,
+    pub current_direction: Option<Direction>,
+    /// Direction attribute of the remote m-line, from the remote's perspective.
+    pub remote_direction: Option<Direction>,
+    pub remote_stream_ids: Vec<String>,
+    pub remote_track_id: Option<String>,
+    pub created_by_remote: bool,
+    pub sender_track_id: String,
+    pub stopped: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CodecName {
+    Opus,
+    Vp8,
+    Vp9,
+    H264,
+    Av1,
+}
+
+impl CodecName {
+    pub fn wire_id(self) -> u8 {
+        match self {
+            CodecName::Vp8 => 1,
+            CodecName::Vp9 => 2,
+            CodecName::H264 => 3,
+            CodecName::Av1 => 4,
+            CodecName::Opus => 10,
+        }
+    }
+    pub fn from_wire_id(v: u8) -> Option<Self> {
+        Some(match v {
+            1 => CodecName::Vp8,
+            2 => CodecName::Vp9,
+            3 => CodecName::H264,
+            4 => CodecName::Av1,
+            10 => CodecName::Opus,
+            _ => return None,
+        })
+    }
+    pub fn kind(self) -> TrackKind {
+        if self == CodecName::Opus { TrackKind::Audio } else { TrackKind::Video }
+    }
+}
+
+/// An encoded frame travelling between the page and the engine.
+#[derive(Debug, Clone)]
+pub struct EncodedFrame {
+    pub tx: TxId,
+    pub codec: CodecName,
+    pub keyframe: bool,
+    /// Capture (send) or RTP (receive) time in microseconds.
+    pub timestamp_us: u64,
+    pub data: Arc<[u8]>,
+}
+
 /// Payload of a data channel message.
 #[derive(Debug, Clone)]
 pub enum Payload {
@@ -179,6 +320,13 @@ pub enum PeerEvent {
     /// Message payloads are delivered through the raw sink, not serialised.
     #[serde(skip)]
     DcMessage { handle: DcHandle, payload: Payload },
+    /// The remote asked our sender for a keyframe (PLI/FIR).
+    KeyframeRequest { tx: TxId },
+    /// Bandwidth estimate for our outgoing media, in bits per second.
+    TargetBitrate { bps: u64 },
+    /// Encoded media received on a transceiver. Raw path, not serialised.
+    #[serde(skip)]
+    MediaFrame(EncodedFrame),
 }
 
 /// Receives engine events. Called from engine threads.
@@ -194,8 +342,17 @@ pub trait PeerEngine: Send + Sync + 'static {
 pub trait Peer: Send + Sync {
     fn create_offer(&self) -> Result<SessionDescription>;
     fn create_answer(&self) -> Result<SessionDescription>;
-    fn set_local_description(&self, desc: &SessionDescription) -> Result<()>;
-    fn set_remote_description(&self, desc: &SessionDescription) -> Result<()>;
+    fn set_local_description(&self, desc: &SessionDescription) -> Result<Vec<TransceiverState>>;
+    fn set_remote_description(&self, desc: &SessionDescription) -> Result<Vec<TransceiverState>>;
+    /// Create or update a transceiver from the JS side.
+    fn upsert_transceiver(&self, spec: TransceiverSpec) -> Result<()>;
+    /// Send an encoded frame on a transceiver (non-blocking; dropped if the
+    /// transceiver cannot send).
+    fn send_frame(&self, frame: EncodedFrame) -> Result<()>;
+    /// Ask the remote sender on this transceiver for a keyframe.
+    fn request_keyframe(&self, tx: TxId) -> Result<()>;
+    /// `restartIce()`: the next offer restarts ICE.
+    fn restart_ice(&self) -> Result<()>;
     fn local_description(&self) -> Option<SessionDescription>;
     fn remote_description(&self) -> Option<SessionDescription>;
     fn add_ice_candidate(&self, candidate: &IceCandidate) -> Result<()>;

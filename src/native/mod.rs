@@ -7,6 +7,7 @@
 //! [`NativePeer`] is a cheap handle that sends commands to the driver.
 
 mod driver;
+mod jsep;
 mod mdns;
 mod net;
 mod stun;
@@ -73,8 +74,12 @@ pub(crate) type Reply<T> = oneshot::Sender<Result<T>>;
 pub(crate) enum Cmd {
     CreateOffer(Reply<SessionDescription>),
     CreateAnswer(Reply<SessionDescription>),
-    SetLocal(SessionDescription, Reply<()>),
-    SetRemote(SessionDescription, Reply<()>),
+    SetLocal(SessionDescription, Reply<Vec<TransceiverState>>),
+    SetRemote(SessionDescription, Reply<Vec<TransceiverState>>),
+    UpsertTx(TransceiverSpec, Reply<()>),
+    SendFrame(EncodedFrame),
+    RequestKeyframe(TxId),
+    RestartIce,
     AddIce(IceCandidate, Reply<()>),
     CreateDc(String, DataChannelInit, Reply<DataChannelInfo>),
     DcSend(DcHandle, Payload),
@@ -108,13 +113,29 @@ impl Peer for NativePeer {
     fn create_answer(&self) -> Result<SessionDescription> {
         self.call(Cmd::CreateAnswer)
     }
-    fn set_local_description(&self, desc: &SessionDescription) -> Result<()> {
+    fn set_local_description(&self, desc: &SessionDescription) -> Result<Vec<TransceiverState>> {
         let d = desc.clone();
         self.call(|r| Cmd::SetLocal(d, r))
     }
-    fn set_remote_description(&self, desc: &SessionDescription) -> Result<()> {
+    fn set_remote_description(&self, desc: &SessionDescription) -> Result<Vec<TransceiverState>> {
         let d = desc.clone();
         self.call(|r| Cmd::SetRemote(d, r))
+    }
+    fn upsert_transceiver(&self, spec: TransceiverSpec) -> Result<()> {
+        self.call(|r| Cmd::UpsertTx(spec, r))
+    }
+    fn send_frame(&self, frame: EncodedFrame) -> Result<()> {
+        self.tx
+            .send(Cmd::SendFrame(frame))
+            .map_err(|_| Error::InvalidState("peer connection is closed".into()))
+    }
+    fn request_keyframe(&self, tx: TxId) -> Result<()> {
+        let _ = self.tx.send(Cmd::RequestKeyframe(tx));
+        Ok(())
+    }
+    fn restart_ice(&self) -> Result<()> {
+        let _ = self.tx.send(Cmd::RestartIce);
+        Ok(())
     }
     fn local_description(&self) -> Option<SessionDescription> {
         None
@@ -249,5 +270,159 @@ mod tests {
         let mut offer = a.create_offer().unwrap();
         offer.sdp = offer.sdp.replace("a=setup:actpass", "a=setup:active");
         assert!(matches!(a.set_local_description(&offer), Err(Error::InvalidModification(_))));
+    }
+}
+
+#[cfg(test)]
+mod media_tests {
+    use super::*;
+    use std::sync::mpsc as smpsc;
+    use std::time::{Duration, Instant};
+
+    fn fixture() -> Vec<(bool, Vec<u8>)> {
+        let raw = include_bytes!("../../tests/fixtures/vp8-160x120.bin");
+        let mut out = Vec::new();
+        let mut p = 0;
+        while p + 5 <= raw.len() {
+            let key = raw[p] == 1;
+            let len = u32::from_le_bytes(raw[p + 1..p + 5].try_into().unwrap()) as usize;
+            out.push((key, raw[p + 5..p + 5 + len].to_vec()));
+            p += 5 + len;
+        }
+        out
+    }
+
+    fn peer(engine: &NativeEngine) -> (Box<dyn Peer>, smpsc::Receiver<PeerEvent>) {
+        let (tx, rx) = smpsc::channel();
+        let tx = Mutex::new(tx);
+        let p = engine
+            .create_peer(&RtcConfiguration::default(), Arc::new(move |e| { let _ = tx.lock().unwrap().send(e); }))
+            .unwrap();
+        (p, rx)
+    }
+
+    fn spec(id: TxId, kind: TrackKind, dir: Direction, stream: &str, track: &str, from_add_track: bool) -> TransceiverSpec {
+        TransceiverSpec {
+            id,
+            kind,
+            direction: dir,
+            stream_ids: vec![stream.into()],
+            sender_track_id: track.into(),
+            from_add_track,
+            stopped: false,
+        }
+    }
+
+    /// Pump candidates between two peers; return frames each side received.
+    fn pump(a: &dyn Peer, rx_a: &smpsc::Receiver<PeerEvent>, b: &dyn Peer, rx_b: &smpsc::Receiver<PeerEvent>,
+            a_tx: TxId, b_tx: TxId, secs: u64) -> (Vec<EncodedFrame>, Vec<EncodedFrame>) {
+        let frames = fixture();
+        let (mut got_a, mut got_b) = (Vec::new(), Vec::new());
+        let start = Instant::now();
+        let mut i = 0usize;
+        while start.elapsed() < Duration::from_secs(secs) {
+            for (rx, other, got) in [(rx_a, b, &mut got_a), (rx_b, a, &mut got_b)] {
+                while let Ok(e) = rx.try_recv() {
+                    match e {
+                        PeerEvent::IceCandidate { candidate: Some(c) } => other.add_ice_candidate(&c).unwrap(),
+                        PeerEvent::MediaFrame(f) => got.push(f),
+                        _ => {}
+                    }
+                }
+            }
+            // ~15 fps from both sides, looping the fixture (restart = keyframe).
+            let (key, data) = &frames[i % frames.len()];
+            let ts = (i as u64) * 66_666;
+            for (p, tx) in [(a, a_tx), (b, b_tx)] {
+                p.send_frame(EncodedFrame { tx, codec: CodecName::Vp8, keyframe: *key, timestamp_us: ts, data: data.clone().into() }).unwrap();
+            }
+            i += 1;
+            std::thread::sleep(Duration::from_millis(66));
+        }
+        (got_a, got_b)
+    }
+
+    #[test]
+    fn video_both_ways_with_msid() {
+        let engine = NativeEngine::new().unwrap();
+        let (a, rx_a) = peer(&engine);
+        let (b, rx_b) = peer(&engine);
+        a.upsert_transceiver(spec(1, TrackKind::Video, Direction::Sendrecv, "streamA", "trackA", true)).unwrap();
+        let offer = a.create_offer().unwrap();
+        assert!(offer.sdp.contains("a=msid:streamA trackA"), "offer carries page msid");
+        a.set_local_description(&offer).unwrap();
+
+        // matrix-js-sdk inbound flow: setRemote first, then addTrack, then createAnswer.
+        let states = b.set_remote_description(&offer).unwrap();
+        assert_eq!(states.len(), 1);
+        let remote_tx = &states[0];
+        assert!(remote_tx.created_by_remote);
+        assert_eq!(remote_tx.remote_stream_ids, vec!["streamA".to_string()]);
+        assert_eq!(remote_tx.remote_track_id.as_deref(), Some("trackA"));
+        let b_tx = remote_tx.id;
+        let mut s = spec(b_tx, TrackKind::Video, Direction::Sendrecv, "streamB", "trackB", false);
+        s.sender_track_id = remote_tx.sender_track_id.clone();
+        s.stream_ids = vec!["streamB".into()];
+        b.upsert_transceiver(s.clone()).unwrap();
+        let answer = b.create_answer().unwrap();
+        assert!(answer.sdp.contains(&format!("a=msid:streamB {}", s.sender_track_id)), "answer carries answerer msid");
+        assert!(answer.sdp.contains("a=sendrecv"));
+        let b_states = b.set_local_description(&answer).unwrap();
+        assert_eq!(b_states[0].current_direction, Some(Direction::Sendrecv));
+        let a_states = a.set_remote_description(&answer).unwrap();
+        assert_eq!(a_states[0].current_direction, Some(Direction::Sendrecv));
+        assert_eq!(a_states[0].remote_stream_ids, vec!["streamB".to_string()]);
+
+        let (got_a, got_b) = pump(&*a, &rx_a, &*b, &rx_b, 1, b_tx, 4);
+        assert!(got_b.len() > 20, "B received {} frames", got_b.len());
+        assert!(got_a.len() > 20, "A received {} frames", got_a.len());
+        assert!(got_b.iter().any(|f| f.keyframe) && got_a.iter().any(|f| f.keyframe));
+        assert!(got_b.iter().all(|f| f.codec == CodecName::Vp8 && f.tx == b_tx));
+        // Frame bytes survive packetisation.
+        let fx = fixture();
+        assert!(got_b.iter().any(|f| &*f.data == fx[0].1.as_slice()));
+        a.close();
+        b.close();
+    }
+
+    #[test]
+    fn glare_rolls_back_polite_offer() {
+        let engine = NativeEngine::new().unwrap();
+        let (a, _ra) = peer(&engine);
+        let (b, _rb) = peer(&engine);
+        a.upsert_transceiver(spec(1, TrackKind::Audio, Direction::Sendrecv, "sa", "ta", true)).unwrap();
+        b.upsert_transceiver(spec(1, TrackKind::Audio, Direction::Sendrecv, "sb", "tb", true)).unwrap();
+        let offer_a = a.create_offer().unwrap();
+        a.set_local_description(&offer_a).unwrap();
+        let offer_b = b.create_offer().unwrap();
+        b.set_local_description(&offer_b).unwrap();
+        // b is polite: accepts a's offer, implicitly rolling back its own.
+        let states = b.set_remote_description(&offer_a).unwrap();
+        // b's addTrack transceiver is associated with a's audio m-line, not duplicated.
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].id, 1);
+        assert!(!states[0].created_by_remote);
+        let answer = b.create_answer().unwrap();
+        assert!(answer.sdp.contains("a=msid:sb tb"));
+        b.set_local_description(&answer).unwrap();
+        a.set_remote_description(&answer).unwrap();
+        a.close();
+        b.close();
+    }
+
+    #[test]
+    fn explicit_rollback_of_remote_offer() {
+        let engine = NativeEngine::new().unwrap();
+        let (a, _ra) = peer(&engine);
+        let (b, _rb) = peer(&engine);
+        a.upsert_transceiver(spec(1, TrackKind::Video, Direction::Sendonly, "s", "t", true)).unwrap();
+        let offer = a.create_offer().unwrap();
+        a.set_local_description(&offer).unwrap();
+        let st = b.set_remote_description(&offer).unwrap();
+        assert_eq!(st.len(), 1);
+        let st = b
+            .set_local_description(&SessionDescription { kind: SdpType::Rollback, sdp: String::new() })
+            .unwrap();
+        assert!(st.is_empty(), "remote-created transceiver removed on rollback");
     }
 }

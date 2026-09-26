@@ -2,6 +2,7 @@
 //! channel queues. Every mutation of the `Rtc` is followed by [`Driver::drain`].
 
 use super::net::{bind_host_sockets, HostSocket};
+use super::jsep;
 use super::stun::{self, Message, TransId};
 use super::turn::{TurnClient, TurnEvent};
 use super::{ChannelShared, Cmd, Shared};
@@ -13,7 +14,10 @@ use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 use str0m::net::{Protocol, Receive};
 use str0m::stats::PeerStats;
+use str0m::format::Codec;
+use str0m::media::{Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
+use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
 /// A STUN or TURN server after DNS resolution.
@@ -104,6 +108,101 @@ enum Sig {
     HaveRemoteOffer,
 }
 
+fn s_kind(k: TrackKind) -> MediaKind {
+    match k {
+        TrackKind::Audio => MediaKind::Audio,
+        TrackKind::Video => MediaKind::Video,
+    }
+}
+
+fn s_dir(d: Direction) -> str0m::media::Direction {
+    use str0m::media::Direction as S;
+    match d {
+        Direction::Sendrecv => S::SendRecv,
+        Direction::Sendonly => S::SendOnly,
+        Direction::Recvonly => S::RecvOnly,
+        Direction::Inactive | Direction::Stopped => S::Inactive,
+    }
+}
+
+fn codec_name(c: Codec) -> Option<CodecName> {
+    Some(match c {
+        Codec::Opus => CodecName::Opus,
+        Codec::Vp8 => CodecName::Vp8,
+        Codec::Vp9 => CodecName::Vp9,
+        Codec::H264 => CodecName::H264,
+        Codec::Av1 => CodecName::Av1,
+        _ => return None,
+    })
+}
+
+fn same_codec(c: Codec, n: CodecName) -> bool {
+    codec_name(c) == Some(n)
+}
+
+/// One transceiver as the JSEP layer sees it.
+struct Tx {
+    spec: TransceiverSpec,
+    /// Negotiated (or pending, see `mid_pending`) mid.
+    mid: Option<String>,
+    /// The mid came from an offer that is not answered yet (rollback-able).
+    mid_pending: bool,
+    /// Mid allocated in a created-but-not-set local offer.
+    offered_mid: Option<String>,
+    offered_direction: Option<Direction>,
+    negotiated_direction: Option<Direction>,
+    current_direction: Option<Direction>,
+    remote_dir: Option<Direction>,
+    remote_streams: Vec<String>,
+    remote_track: Option<String>,
+    created_by_remote: bool,
+    stop_sent: bool,
+    last_kf_req: Option<Instant>,
+}
+
+impl Tx {
+    fn new(spec: TransceiverSpec) -> Self {
+        Tx {
+            spec,
+            mid: None,
+            mid_pending: false,
+            offered_mid: None,
+            offered_direction: None,
+            negotiated_direction: None,
+            current_direction: None,
+            remote_dir: None,
+            remote_streams: Vec::new(),
+            remote_track: None,
+            created_by_remote: false,
+            stop_sent: false,
+            last_kf_req: None,
+        }
+    }
+    fn stopped(&self) -> bool {
+        self.spec.stopped || self.spec.direction == Direction::Stopped
+    }
+    fn set_remote(&mut self, sec: &jsep::Section) {
+        self.remote_dir = Some(if sec.port_zero { Direction::Inactive } else { sec.direction });
+        self.remote_streams = sec.stream_ids();
+        self.remote_track = sec.track_id();
+    }
+    fn state(&self) -> TransceiverState {
+        TransceiverState {
+            id: self.spec.id,
+            kind: self.spec.kind,
+            mid: self.mid.clone(),
+            direction: self.spec.direction,
+            current_direction: self.current_direction,
+            remote_direction: self.remote_dir,
+            remote_stream_ids: self.remote_streams.clone(),
+            remote_track_id: self.remote_track.clone(),
+            created_by_remote: self.created_by_remote,
+            sender_track_id: self.spec.sender_track_id.clone(),
+            stopped: self.stopped() || self.current_direction == Some(Direction::Stopped),
+        }
+    }
+}
+
 struct Chan {
     config: ChannelConfig,
     /// str0m channel id, once the channel was added to a session change.
@@ -153,6 +252,14 @@ pub(crate) struct Driver {
     pending_flush: Vec<DcHandle>,
     /// Channels whose buffered-low event is due to the JS side this cycle.
     pending_low: Vec<DcHandle>,
+    txs: BTreeMap<TxId, Tx>,
+    next_remote_tx: TxId,
+    /// Remote offer set but not yet applied to str0m (applied in createAnswer).
+    pending_remote: Option<String>,
+    /// str0m's answer to `pending_remote`, before our rewrite.
+    raw_answer: Option<String>,
+    buffered_candidates: Vec<String>,
+    ice_restart: bool,
 }
 
 fn norm(sdp: &str) -> String {
@@ -171,7 +278,14 @@ impl Driver {
     pub(crate) fn new(config: RtcConfiguration, events: EventSink, shared: Arc<Shared>) -> Result<Self> {
         let now = Instant::now();
         let relay_only = config.ice_transport_policy.as_deref() == Some("relay");
-        let rtc = RtcConfig::new().set_stats_interval(Some(Duration::from_secs(1))).build(now);
+        // Offer what the page can encode and decode: Opus (engine) and VP8
+        // (WebCodecs, always present with WebKitGTK via gst-plugins-good).
+        let rtc = RtcConfig::new()
+            .clear_codecs()
+            .enable_opus(true, false)
+            .enable_vp8(true)
+            .set_stats_interval(Some(Duration::from_secs(1)))
+            .build(now);
         let sockets = bind_host_sockets().map_err(op("bind sockets"))?;
         if sockets.is_empty() {
             return Err(Error::Operation("no usable network interface".into()));
@@ -210,6 +324,12 @@ impl Driver {
             closed: false,
             pending_flush: Vec::new(),
             pending_low: Vec::new(),
+            txs: BTreeMap::new(),
+            next_remote_tx: REMOTE_TX_BASE,
+            pending_remote: None,
+            raw_answer: None,
+            buffered_candidates: Vec::new(),
+            ice_restart: false,
         };
         for s in d.sockets.iter().filter(|_| !relay_only) {
             match Candidate::host(s.local, "udp") {
@@ -387,12 +507,15 @@ impl Driver {
                 let _ = r.send(self.create_offer());
             }
             Cmd::CreateAnswer(r) => {
-                let res = match (self.sig, &self.answer) {
-                    (Sig::HaveRemoteOffer, Some(a)) => Ok(SessionDescription { kind: SdpType::Answer, sdp: a.clone() }),
-                    _ => Err(Error::InvalidState("createAnswer needs a remote offer".into())),
-                };
-                let _ = r.send(res);
+                let _ = r.send(self.create_answer());
             }
+            Cmd::UpsertTx(spec, r) => {
+                self.upsert_tx(spec);
+                let _ = r.send(Ok(()));
+            }
+            Cmd::SendFrame(f) => self.send_frame(f),
+            Cmd::RequestKeyframe(tx) => self.request_keyframe(tx),
+            Cmd::RestartIce => self.ice_restart = true,
             Cmd::SetLocal(d, r) => {
                 let _ = r.send(self.set_local(d));
             }
@@ -439,6 +562,39 @@ impl Driver {
         }
     }
 
+    // ============================ JSEP ============================
+
+    fn tx_by_mid(&self, mid: &str) -> Option<TxId> {
+        self.txs.iter().find(|(_, t)| t.mid.as_deref() == Some(mid)).map(|(id, _)| *id)
+    }
+
+    fn tx_states(&self) -> Vec<TransceiverState> {
+        self.txs.values().map(Tx::state).collect()
+    }
+
+    /// Rewrite direction and msid of outgoing SDP from the transceiver model.
+    fn munge(&self, raw: &str, answer: bool) -> String {
+        jsep::rewrite(raw, |mid| {
+            let t = self
+                .txs
+                .values()
+                .find(|t| t.mid.as_deref() == Some(mid) || t.offered_mid.as_deref() == Some(mid))?;
+            let dir = if t.stopped() {
+                Direction::Inactive
+            } else if answer {
+                let remote = t.remote_dir.unwrap_or(Direction::Sendrecv);
+                Direction::from_flags(
+                    t.spec.direction.sends() && remote.recvs(),
+                    t.spec.direction.recvs() && remote.sends(),
+                )
+            } else {
+                t.spec.direction
+            };
+            let msid = dir.sends().then(|| (t.spec.stream_ids.clone(), t.spec.sender_track_id.clone()));
+            Some(jsep::Rewrite { direction: dir, msid })
+        })
+    }
+
     fn create_offer(&mut self) -> Result<SessionDescription> {
         match self.sig {
             Sig::HaveRemoteOffer => return Err(Error::InvalidState("have-remote-offer".into())),
@@ -449,20 +605,54 @@ impl Driver {
             }
             Sig::Stable => {}
         }
+        // Built from scratch each time; an earlier created-but-unset offer is discarded.
+        self.created_offer = None;
+        for t in self.txs.values_mut() {
+            t.offered_mid = None;
+        }
+        for ch in self.chans.values_mut().filter(|c| !c.confirmed) {
+            ch.id = None;
+        }
         let mut api = self.rtc.sdp_api();
-        if let Some((_, pending)) = self.created_offer.take() {
-            api.merge(pending);
+        for t in self.txs.values_mut() {
+            if t.stopped() {
+                if let (Some(mid), false) = (&t.mid, t.stop_sent) {
+                    api.stop_media(Mid::from(mid.as_str()));
+                }
+                continue;
+            }
+            match &t.mid {
+                None => {
+                    let mid = api.add_media(
+                        s_kind(t.spec.kind),
+                        s_dir(t.spec.direction),
+                        t.spec.stream_ids.first().cloned(),
+                        Some(t.spec.sender_track_id.clone()),
+                        None,
+                    );
+                    t.offered_mid = Some(mid.to_string());
+                    t.offered_direction = Some(t.spec.direction);
+                }
+                Some(mid) => {
+                    if t.negotiated_direction != Some(t.spec.direction) {
+                        api.set_direction(Mid::from(mid.as_str()), s_dir(t.spec.direction));
+                    }
+                    t.offered_direction = Some(t.spec.direction);
+                }
+            }
         }
         for ch in self.chans.values_mut().filter(|c| c.id.is_none() && !c.closed) {
-            let id = api.add_channel_with_config(ch.config.clone());
-            ch.id = Some(id);
+            ch.id = Some(api.add_channel_with_config(ch.config.clone()));
+        }
+        if self.ice_restart {
+            api.ice_restart(true);
         }
         let applied = api.apply();
         self.rebuild_by_id();
         self.drain();
         match applied {
             Some((offer, pending)) => {
-                let sdp = offer.to_sdp_string();
+                let sdp = self.munge(&offer.to_sdp_string(), false);
                 self.created_offer = Some((sdp.clone(), pending));
                 Ok(SessionDescription { kind: SdpType::Offer, sdp })
             }
@@ -470,7 +660,78 @@ impl Driver {
         }
     }
 
-    fn set_local(&mut self, d: SessionDescription) -> Result<()> {
+    fn create_answer(&mut self) -> Result<SessionDescription> {
+        if self.sig != Sig::HaveRemoteOffer {
+            return Err(Error::InvalidState("createAnswer needs a remote offer".into()));
+        }
+        // str0m's accept_offer happens here rather than in setRemoteDescription,
+        // so tracks added after the remote offer (matrix-js-sdk's inbound flow)
+        // shape the answer, and remote offers stay rollback-able until now.
+        if self.raw_answer.is_none() {
+            let (sdp, has_app_line) = match &self.pending_remote {
+                Some(p) => (p.clone(), has_app(p)),
+                None => return Err(Error::InvalidState("no remote offer".into())),
+            };
+            let offer = SdpOffer::from_sdp_string(&sdp)
+                .map_err(|e| Error::Operation(format!("Failed to parse SessionDescription: {e}")))?;
+            let res = self.rtc.sdp_api().accept_offer(offer);
+            self.drain();
+            let answer = res.map_err(op("createAnswer"))?;
+            self.raw_answer = Some(answer.to_sdp_string());
+            for c in std::mem::take(&mut self.buffered_candidates) {
+                self.add_remote_candidate_str(&c);
+            }
+            if has_app_line {
+                self.app_negotiated = true;
+                for ch in self.chans.values_mut().filter(|c| !c.confirmed) {
+                    ch.id = None;
+                }
+                self.create_pending_direct();
+            }
+        }
+        let sdp = self.munge(self.raw_answer.as_deref().unwrap_or_default(), true);
+        self.answer = Some(sdp.clone());
+        Ok(SessionDescription { kind: SdpType::Answer, sdp })
+    }
+
+    fn rollback_local(&mut self) {
+        self.created_offer = None;
+        self.local_offer = None;
+        for t in self.txs.values_mut() {
+            if t.mid_pending {
+                t.mid = None;
+                t.mid_pending = false;
+            }
+            t.offered_mid = None;
+            t.offered_direction = None;
+        }
+        for ch in self.chans.values_mut().filter(|c| !c.confirmed) {
+            ch.id = None;
+        }
+        self.sig = Sig::Stable;
+    }
+
+    fn rollback_remote(&mut self) -> Result<()> {
+        if self.raw_answer.is_some() {
+            return Err(Error::InvalidState("remote offer was already applied by createAnswer()".into()));
+        }
+        self.pending_remote = None;
+        self.buffered_candidates.clear();
+        self.txs.retain(|_, t| !(t.created_by_remote && t.mid_pending));
+        for t in self.txs.values_mut() {
+            if t.mid_pending {
+                t.mid = None;
+                t.mid_pending = false;
+                t.remote_dir = None;
+                t.remote_streams.clear();
+                t.remote_track = None;
+            }
+        }
+        self.sig = Sig::Stable;
+        Ok(())
+    }
+
+    fn set_local(&mut self, d: SessionDescription) -> Result<Vec<TransceiverState>> {
         match d.kind {
             SdpType::Offer => {
                 if self.sig != Sig::Stable {
@@ -483,6 +744,12 @@ impl Driver {
                     self.created_offer = Some((sdp, pending));
                     return Err(Error::InvalidModification("SDP munging is not supported".into()));
                 }
+                for t in self.txs.values_mut() {
+                    if let Some(mid) = t.offered_mid.take() {
+                        t.mid = Some(mid);
+                        t.mid_pending = true;
+                    }
+                }
                 self.local_sdp = Some(sdp.clone());
                 self.local_offer = Some((sdp, pending));
                 self.sig = Sig::HaveLocalOffer;
@@ -493,37 +760,97 @@ impl Driver {
                 if !ok {
                     return Err(Error::InvalidModification("answer does not match createAnswer()".into()));
                 }
-                self.local_sdp = self.answer.take();
+                let answer = self.answer.take().unwrap_or_default();
+                for sec in jsep::parse(&answer) {
+                    let Some(id) = sec.mid.as_deref().and_then(|m| self.tx_by_mid(m)) else { continue };
+                    if let Some(t) = self.txs.get_mut(&id) {
+                        t.current_direction = Some(if sec.port_zero { Direction::Stopped } else { sec.direction });
+                        t.negotiated_direction = Some(t.spec.direction);
+                        t.mid_pending = false;
+                        if sec.port_zero {
+                            t.stop_sent = true;
+                        }
+                    }
+                }
+                self.local_sdp = Some(answer);
+                self.pending_remote = None;
+                self.raw_answer = None;
                 self.sig = Sig::Stable;
             }
-            _ => return Err(Error::NotSupported(format!("{:?} descriptions", d.kind))),
+            SdpType::Rollback => match self.sig {
+                Sig::HaveLocalOffer => self.rollback_local(),
+                Sig::HaveRemoteOffer => self.rollback_remote()?,
+                Sig::Stable => return Err(Error::InvalidState("nothing to roll back".into())),
+            },
+            SdpType::Pranswer => return Err(Error::NotSupported("pranswer".into())),
         }
-        self.start_gathering();
-        Ok(())
+        if d.kind != SdpType::Rollback {
+            self.start_gathering();
+        }
+        Ok(self.tx_states())
     }
 
-    fn set_remote(&mut self, d: SessionDescription) -> Result<()> {
+    fn set_remote(&mut self, d: SessionDescription) -> Result<Vec<TransceiverState>> {
         match d.kind {
             SdpType::Offer => {
-                if self.sig == Sig::HaveLocalOffer {
-                    return Err(Error::InvalidState("glare: rollback is not supported".into()));
+                match self.sig {
+                    // Perfect negotiation: a remote offer implicitly rolls back ours.
+                    Sig::HaveLocalOffer => self.rollback_local(),
+                    Sig::HaveRemoteOffer => self.rollback_remote()?,
+                    Sig::Stable => {}
                 }
-                let offer = SdpOffer::from_sdp_string(&d.sdp)
+                SdpOffer::from_sdp_string(&d.sdp)
                     .map_err(|e| Error::Operation(format!("Failed to parse SessionDescription: {e}")))?;
-                self.created_offer = None;
-                let res = self.rtc.sdp_api().accept_offer(offer);
-                self.drain();
-                let answer = res.map_err(op("setRemoteDescription"))?;
-                self.answer = Some(answer.to_sdp_string());
-                self.sig = Sig::HaveRemoteOffer;
-                if has_app(&d.sdp) {
-                    self.app_negotiated = true;
-                    // Channels created locally but never negotiated open in-band now.
-                    for ch in self.chans.values_mut().filter(|c| !c.confirmed) {
-                        ch.id = None;
+                for sec in jsep::parse(&d.sdp) {
+                    let jsep::SectionKind::Media(kind) = sec.kind else { continue };
+                    let Some(mid) = sec.mid.clone() else { continue };
+                    let id = match self.tx_by_mid(&mid) {
+                        Some(id) => id,
+                        None => {
+                            let reuse = self
+                                .txs
+                                .iter()
+                                .filter(|(_, t)| {
+                                    t.spec.kind == kind && t.mid.is_none() && !t.stopped() && t.spec.from_add_track
+                                })
+                                .map(|(id, _)| *id)
+                                .min();
+                            match reuse {
+                                Some(id) => {
+                                    let t = self.txs.get_mut(&id).unwrap();
+                                    t.mid = Some(mid.clone());
+                                    t.mid_pending = true;
+                                    id
+                                }
+                                None => {
+                                    let id = self.next_remote_tx;
+                                    self.next_remote_tx += 1;
+                                    let mut t = Tx::new(TransceiverSpec {
+                                        id,
+                                        kind,
+                                        direction: Direction::Recvonly,
+                                        stream_ids: Vec::new(),
+                                        sender_track_id: format!("{:016x}", rand::random::<u64>()),
+                                        from_add_track: false,
+                                        stopped: false,
+                                    });
+                                    t.created_by_remote = true;
+                                    t.mid = Some(mid.clone());
+                                    t.mid_pending = true;
+                                    self.txs.insert(id, t);
+                                    id
+                                }
+                            }
+                        }
+                    };
+                    if let Some(t) = self.txs.get_mut(&id) {
+                        t.set_remote(&sec);
                     }
-                    self.create_pending_direct();
                 }
+                self.pending_remote = Some(d.sdp.clone());
+                self.raw_answer = None;
+                self.answer = None;
+                self.sig = Sig::HaveRemoteOffer;
             }
             SdpType::Answer => {
                 if self.sig != Sig::HaveLocalOffer {
@@ -535,9 +862,21 @@ impl Driver {
                 let res = self.rtc.sdp_api().accept_answer(pending, answer);
                 self.drain();
                 if let Err(e) = res {
-                    self.local_offer = None;
-                    self.sig = Sig::Stable;
+                    self.rollback_local();
                     return Err(Error::Operation(format!("setRemoteDescription: {e}")));
+                }
+                for sec in jsep::parse(&d.sdp) {
+                    let Some(id) = sec.mid.as_deref().and_then(|m| self.tx_by_mid(m)) else { continue };
+                    if let Some(t) = self.txs.get_mut(&id) {
+                        t.mid_pending = false;
+                        t.negotiated_direction = t.offered_direction.take().or(t.negotiated_direction);
+                        t.current_direction =
+                            Some(if sec.port_zero { Direction::Stopped } else { sec.direction.invert() });
+                        if t.stopped() || sec.port_zero {
+                            t.stop_sent = true;
+                        }
+                        t.set_remote(&sec);
+                    }
                 }
                 self.sig = Sig::Stable;
                 if has_app(&sdp) && has_app(&d.sdp) {
@@ -547,10 +886,62 @@ impl Driver {
                     }
                     self.create_pending_direct();
                 }
+                self.ice_restart = false;
             }
-            _ => return Err(Error::NotSupported(format!("{:?} descriptions", d.kind))),
+            SdpType::Rollback => {
+                if self.sig != Sig::HaveRemoteOffer {
+                    return Err(Error::InvalidState("no remote offer to roll back".into()));
+                }
+                self.rollback_remote()?;
+            }
+            SdpType::Pranswer => return Err(Error::NotSupported("pranswer".into())),
         }
-        Ok(())
+        Ok(self.tx_states())
+    }
+
+    fn upsert_tx(&mut self, spec: TransceiverSpec) {
+        match self.txs.get_mut(&spec.id) {
+            Some(t) => t.spec = spec,
+            None => {
+                self.txs.insert(spec.id, Tx::new(spec));
+            }
+        }
+    }
+
+    fn send_frame(&mut self, f: EncodedFrame) {
+        let Some(t) = self.txs.get(&f.tx) else { return };
+        let can_send = !t.stopped() && t.current_direction.map(|d| d.sends()).unwrap_or(false);
+        let Some(mid) = t.mid.clone().filter(|_| can_send) else { return };
+        let Some(w) = self.rtc.writer(Mid::from(mid.as_str())) else { return };
+        let Some(pt) = w.payload_params().find(|p| same_codec(p.spec().codec, f.codec)).map(|p| p.pt()) else {
+            log::debug!("tx {} ({mid}): {:?} not negotiated", f.tx, f.codec);
+            return;
+        };
+        let rtp_time = match f.codec.kind() {
+            TrackKind::Audio => MediaTime::new(f.timestamp_us * 48 / 1000, Frequency::FORTY_EIGHT_KHZ),
+            TrackKind::Video => MediaTime::new(f.timestamp_us * 9 / 100, Frequency::NINETY_KHZ),
+        };
+        if let Err(e) = w.write(pt, Instant::now(), rtp_time, f.data) {
+            log::debug!("write {mid}: {e}");
+        }
+        self.drain();
+    }
+
+    fn request_keyframe(&mut self, tx: TxId) {
+        let Some(mid) = self.txs.get(&tx).and_then(|t| t.mid.clone()) else { return };
+        if let Some(t) = self.txs.get_mut(&tx) {
+            let now = Instant::now();
+            if t.last_kf_req.map(|l| now - l < Duration::from_millis(300)).unwrap_or(false) {
+                return;
+            }
+            t.last_kf_req = Some(now);
+        }
+        if let Some(mut w) = self.rtc.writer(Mid::from(mid.as_str())) {
+            if w.is_request_keyframe_possible(KeyframeRequestKind::Pli) {
+                let _ = w.request_keyframe(None, KeyframeRequestKind::Pli);
+            }
+        }
+        self.drain();
     }
 
     fn add_ice(&mut self, c: IceCandidate) -> Result<()> {
@@ -580,6 +971,12 @@ impl Driver {
     }
 
     fn add_remote_candidate_str(&mut self, s: &str) {
+        // Until createAnswer applies a pending remote offer, str0m has no remote
+        // ICE credentials; hold candidates until then.
+        if self.pending_remote.is_some() && self.raw_answer.is_none() {
+            self.buffered_candidates.push(s.to_string());
+            return;
+        }
         match Candidate::from_sdp_string(s) {
             Ok(c) => {
                 self.rtc.add_remote_candidate(c);
@@ -1038,6 +1435,34 @@ impl Driver {
                 }
             }
             Event::PeerStats(s) => self.stats = Some(s),
+            Event::MediaData(d) => {
+                let mid = d.mid.to_string();
+                let Some(tx) = self.tx_by_mid(&mid) else { return };
+                let Some(codec) = codec_name(d.params.spec().codec) else { return };
+                let keyframe = match (&d.codec_extra, codec) {
+                    (_, CodecName::Vp8) => d.data.first().map(|b| b & 1 == 0).unwrap_or(false),
+                    (_, CodecName::Opus) => true,
+                    _ => false,
+                };
+                if !d.contiguous && codec.kind() == TrackKind::Video {
+                    self.request_keyframe(tx);
+                }
+                let timestamp_us = d.time.numer().saturating_mul(1_000_000) / d.time.denom() as u64;
+                self.emit(PeerEvent::MediaFrame(EncodedFrame { tx, codec, keyframe, timestamp_us, data: d.data }));
+            }
+            Event::KeyframeRequest(r) => {
+                if let Some(tx) = self.tx_by_mid(&r.mid.to_string()) {
+                    self.emit(PeerEvent::KeyframeRequest { tx });
+                }
+            }
+            Event::EgressBitrateEstimate(b) => {
+                let bps = match b {
+                    str0m::bwe::BweKind::Twcc { estimate, .. } => estimate.as_u64(),
+                    str0m::bwe::BweKind::Remb { estimate, .. } => estimate.as_u64(),
+                    _ => return,
+                };
+                self.emit(PeerEvent::TargetBitrate { bps });
+            }
             Event::Closed => {
                 let open: Vec<DcHandle> = self.chans.iter().filter(|(_, c)| c.open).map(|(h, _)| *h).collect();
                 for h in open {
