@@ -8,7 +8,7 @@
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
-use tauri_webrtc_engine::gst::GstEngine;
+use tauri_webrtc_engine::native::NativeEngine;
 use tauri_webrtc_engine::*;
 
 fn out(v: Value) {
@@ -20,7 +20,7 @@ fn out(v: Value) {
 fn main() {
     env_logger::init();
     let role = std::env::args().nth(1).unwrap_or_else(|| "answerer".into());
-    let engine = GstEngine::new().unwrap_or_else(|e| {
+    let engine = NativeEngine::new().unwrap_or_else(|e| {
         out(json!({"op":"fatal","error":e.to_string()}));
         std::process::exit(2)
     });
@@ -54,7 +54,11 @@ fn main() {
         other => out(json!({"op":"event","event":other})),
     });
 
-    let p: Arc<dyn Peer> = Arc::from(engine.create_peer(&RtcConfiguration::default(), sink).unwrap());
+    let config: RtcConfiguration = std::env::var("WEBRTC_CONFIG")
+        .ok()
+        .map(|c| serde_json::from_str(&c).expect("WEBRTC_CONFIG is RTCConfiguration JSON"))
+        .unwrap_or_default();
+    let p: Arc<dyn Peer> = Arc::from(engine.create_peer(&config, sink).unwrap());
     *peer.lock().unwrap() = Some(p.clone());
 
     if offerer {

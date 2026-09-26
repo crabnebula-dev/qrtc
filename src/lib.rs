@@ -1,8 +1,8 @@
 //! Engine abstraction for `tauri-plugin-webrtc`.
 //!
 //! The plugin core talks only to [`PeerEngine`] and [`Peer`]. The shipped
-//! implementation wraps GStreamer `webrtcbin` (feature `gst`); the trait keeps
-//! the engine choice reversible (libwebrtc, webrtc-rs, str0m).
+//! implementation is [`native::NativeEngine`]: pure Rust, built on the sans-I/O
+//! str0m stack, with our own JSEP layer, candidate gathering and STUN/TURN.
 //!
 //! All methods are blocking. Callers on an async runtime should run them on a
 //! blocking pool. Events are delivered through an [`EventSink`] from engine
@@ -11,8 +11,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[cfg(feature = "gst")]
-pub mod gst;
+pub mod native;
 
 /// Opaque handle for a data channel, unique per peer connection.
 ///
@@ -33,6 +32,9 @@ pub enum Error {
     /// Maps to DOMException `SyntaxError` (bad SDP or candidate).
     #[error("SyntaxError: {0}")]
     Syntax(String),
+    /// Maps to DOMException `InvalidModificationError` (munged SDP).
+    #[error("InvalidModificationError: {0}")]
+    InvalidModification(String),
 }
 
 impl Error {
@@ -43,6 +45,7 @@ impl Error {
             Error::Operation(_) => "OperationError",
             Error::NotSupported(_) => "NotSupportedError",
             Error::Syntax(_) => "SyntaxError",
+            Error::InvalidModification(_) => "InvalidModificationError",
         }
     }
 }
