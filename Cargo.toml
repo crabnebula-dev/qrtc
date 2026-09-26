@@ -1,0 +1,23 @@
+[package]
+name = "tauri-webrtc-engine"
+description = "Engine trait and GStreamer webrtcbin adapter for tauri-plugin-webrtc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["gst"]
+gst = ["dep:gstreamer", "dep:gstreamer-webrtc", "dep:gstreamer-sdp"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+log.workspace = true
+gstreamer = { version = "0.25", optional = true, features = ["v1_22"] }
+gstreamer-webrtc = { version = "0.25", optional = true, features = ["v1_22"] }
+gstreamer-sdp = { version = "0.25", optional = true }
+
+[dev-dependencies]
+env_logger = "0.11"
