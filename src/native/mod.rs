@@ -325,6 +325,39 @@ mod tests {
         b.close();
     }
 
+    /// Codec parameter edits are tolerated (matrix-js-sdk adds usedtx=1) and
+    /// the edited SDP is what localDescription reports.
+    #[test]
+    fn fmtp_munging_is_accepted() {
+        let engine = NativeEngine::new().unwrap();
+        let (a, _rx) = peer(&engine);
+        a.upsert_transceiver(crate::TransceiverSpec {
+            id: 1,
+            kind: TrackKind::Audio,
+            direction: crate::Direction::Sendrecv,
+            stream_ids: vec!["s".into()],
+            sender_track_id: "t".into(),
+            from_add_track: true,
+            stopped: false,
+        })
+        .unwrap();
+        let mut offer = a.create_offer().unwrap();
+        let fmtp = offer
+            .sdp
+            .lines()
+            .find(|l| l.starts_with("a=fmtp:111"))
+            .unwrap()
+            .to_string();
+        offer.sdp = offer.sdp.replace(&fmtp, &format!("{fmtp};usedtx=1"));
+        // sdp-transform style re-serialisation: same lines, different order.
+        let mut lines: Vec<&str> = offer.sdp.lines().collect();
+        let n = lines.len();
+        lines.swap(n - 1, n - 2);
+        offer.sdp = lines.join("\r\n") + "\r\n";
+        a.set_local_description(&offer).unwrap();
+        a.close();
+    }
+
     #[test]
     fn munged_offer_is_rejected() {
         let engine = NativeEngine::new().unwrap();
@@ -582,8 +615,15 @@ mod media_tests {
         let engine = NativeEngine::new().unwrap();
         let (a, _ra) = peer(&engine);
         let (b, _rb) = peer(&engine);
-        a.upsert_transceiver(spec(1, TrackKind::Audio, Direction::Sendonly, "s", "t", true))
-            .unwrap();
+        a.upsert_transceiver(spec(
+            1,
+            TrackKind::Audio,
+            Direction::Sendonly,
+            "s",
+            "t",
+            true,
+        ))
+        .unwrap();
         let offer = a.create_offer().unwrap();
         a.set_local_description(&offer).unwrap();
         b.set_remote_description(&offer).unwrap();

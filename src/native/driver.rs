@@ -293,12 +293,52 @@ pub(crate) struct Driver {
     bwe_desired_set: bool,
 }
 
+/// Comparable form of an SDP for the "was it munged?" check. Like Chrome and
+/// Safari, we compare semantically: line order within a section, whitespace,
+/// candidates (they arrive by trickle anyway) and codec parameters (`a=fmtp`)
+/// may differ. matrix-js-sdk parses and re-serialises every local description
+/// with sdp-transform and adds `usedtx=1` to Opus. Structural edits (setup
+/// role, ICE credentials, fingerprints, m-lines, directions) are still refused.
+/// `a=msid-semantic` is informational and sdp-transform keeps only its first
+/// stream id; `a=extmap-allow-mixed` is dropped by some serialisers.
 fn norm(sdp: &str) -> String {
-    sdp.lines()
-        .map(str::trim_end)
-        .filter(|l| !l.is_empty())
+    let mut sections: Vec<Vec<String>> = vec![Vec::new()];
+    for line in sdp.lines().map(str::trim) {
+        if line.is_empty()
+            || line.starts_with("a=fmtp:")
+            || line.starts_with("a=candidate:")
+            || line == "a=end-of-candidates"
+            || line.starts_with("c=")
+            || line.starts_with("a=msid-semantic")
+            || line == "a=extmap-allow-mixed"
+        {
+            continue;
+        }
+        if line.starts_with("m=") {
+            sections.push(Vec::new());
+        }
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        sections.last_mut().expect("non-empty").push(line);
+    }
+    sections
+        .into_iter()
+        .map(|mut s| {
+            s.sort();
+            s.join("\n")
+        })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n--\n")
+}
+
+/// Lines that differ between two SDPs after normalisation, for error messages.
+fn munge_diff(created: &str, given: &str) -> String {
+    let na = norm(created);
+    let ng = norm(given);
+    let set_a: std::collections::BTreeSet<&str> = na.lines().collect();
+    let set_g: std::collections::BTreeSet<&str> = ng.lines().collect();
+    let removed: Vec<&str> = set_a.difference(&set_g).copied().take(4).collect();
+    let added: Vec<&str> = set_g.difference(&set_a).copied().take(4).collect();
+    format!("removed {removed:?}, added {added:?}")
 }
 
 fn has_app(sdp: &str) -> bool {
@@ -846,10 +886,11 @@ impl Driver {
                     return Err(Error::InvalidState("no offer was created".into()));
                 };
                 if norm(&sdp) != norm(&d.sdp) {
+                    let diff = munge_diff(&sdp, &d.sdp);
                     self.created_offer = Some((sdp, pending));
-                    return Err(Error::InvalidModification(
-                        "SDP munging is not supported".into(),
-                    ));
+                    return Err(Error::InvalidModification(format!(
+                        "SDP munging is not supported ({diff})"
+                    )));
                 }
                 for t in self.txs.values_mut() {
                     if let Some(mid) = t.offered_mid.take() {
@@ -857,8 +898,9 @@ impl Driver {
                         t.mid_pending = true;
                     }
                 }
-                self.local_sdp = Some(sdp.clone());
-                self.local_offer = Some((sdp, pending));
+                // Report what the page set (it may carry fmtp edits).
+                self.local_sdp = Some(d.sdp.clone());
+                self.local_offer = Some((d.sdp.clone(), pending));
                 self.sig = Sig::HaveLocalOffer;
             }
             SdpType::Answer => {
@@ -891,7 +933,7 @@ impl Driver {
                         }
                     }
                 }
-                self.local_sdp = Some(answer);
+                self.local_sdp = Some(d.sdp.clone());
                 self.pending_remote = None;
                 self.raw_answer = None;
                 self.sig = Sig::Stable;
