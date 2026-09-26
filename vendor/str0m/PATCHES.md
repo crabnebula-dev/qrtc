@@ -12,3 +12,10 @@ tests and docs are dropped and their targets removed from the manifest).
 2. `src/change/sdp.rs`: `SdpApi::apply_offer()` always returns an offer, also
    when nothing changed, as JSEP `createOffer()` does. LiveKit (and perfect
    negotiation in general) calls `createOffer()` on an unchanged session.
+
+3. `Cargo.toml`: `str0m-rust-crypto` comes from `vendor/str0m-rust-crypto`
+   (crates.io 0.6.0, src and manifest only) with one patch: the DTLS
+   certificate (self-signed ECDSA P-256, random 128-bit serial, one year) is
+   built with RustCrypto (`p256`, `x509-cert`) instead of dimpl's `rcgen`
+   feature. That feature enabled `aws-lc-rs`, compiling AWS-LC (C) into an
+   otherwise pure Rust stack.

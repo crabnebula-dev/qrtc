@@ -126,6 +126,7 @@ default-features = false
 
 [dependencies.str0m-rust-crypto]
 version = "0.6.0"
+path = "../str0m-rust-crypto"
 optional = true
 
 [dependencies.subtle]
@@ -158,6 +159,7 @@ version = "1.0"
 
 [dev-dependencies.str0m-rust-crypto]
 version = "0.6.0"
+path = "../str0m-rust-crypto"
 
 [dev-dependencies.systemstat]
 version = "0.2.2"
