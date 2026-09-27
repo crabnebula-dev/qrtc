@@ -524,13 +524,15 @@ mod media_tests {
         rx_b: &smpsc::Receiver<PeerEvent>,
         a_tx: TxId,
         b_tx: TxId,
-        secs: u64,
+        done: impl Fn(&[EncodedFrame], &[EncodedFrame]) -> bool,
     ) -> (Vec<EncodedFrame>, Vec<EncodedFrame>) {
+        // Send until `done` holds or 30 s pass. A fixed window made the
+        // test fail when connection setup was slow on a loaded machine.
         let frames = fixture();
         let (mut got_a, mut got_b) = (Vec::new(), Vec::new());
         let start = Instant::now();
         let mut i = 0usize;
-        while start.elapsed() < Duration::from_secs(secs) {
+        while start.elapsed() < Duration::from_secs(30) && !done(&got_a, &got_b) {
             for (rx, other, got) in [(rx_a, b, &mut got_a), (rx_b, a, &mut got_b)] {
                 while let Ok(e) = rx.try_recv() {
                     match e {
@@ -615,7 +617,14 @@ mod media_tests {
         assert_eq!(a_states[0].current_direction, Some(Direction::Sendrecv));
         assert_eq!(a_states[0].remote_stream_ids, vec!["streamB".to_string()]);
 
-        let (got_a, got_b) = pump(&*a, &rx_a, &*b, &rx_b, 1, b_tx, 4);
+        let fx = fixture();
+        // Enough frames each way, including the fixture's keyframe (frame 0).
+        let enough = |got: &[EncodedFrame]| {
+            got.len() > 20 && got.iter().any(|f| &*f.data == fx[0].1.as_slice())
+        };
+        let (got_a, got_b) = pump(&*a, &rx_a, &*b, &rx_b, 1, b_tx, |ga, gb| {
+            enough(ga) && enough(gb)
+        });
         assert!(got_b.len() > 20, "B received {} frames", got_b.len());
         assert!(got_a.len() > 20, "A received {} frames", got_a.len());
         assert!(got_b.iter().any(|f| f.keyframe) && got_a.iter().any(|f| f.keyframe));
@@ -623,8 +632,8 @@ mod media_tests {
             .iter()
             .all(|f| f.codec == CodecName::Vp8 && f.tx == b_tx));
         // Frame bytes survive packetisation.
-        let fx = fixture();
         assert!(got_b.iter().any(|f| &*f.data == fx[0].1.as_slice()));
+        assert!(got_a.iter().any(|f| &*f.data == fx[0].1.as_slice()));
         a.close();
         b.close();
     }
