@@ -33,7 +33,10 @@ Article 64(10)(b) excludes administrative fines against open-source software ste
 **Secure development.**
 
 - Changes are merged by the maintainer. Commits and releases are signed.
-- The test suite covers JSEP, media, TURN framing, DTMF, and post-quantum DTLS between engines for every policy pair. CI runs it on every push and pull request (`.github/workflows/ci.yml`), on Linux and macOS, with the default, pure Rust and classical-only feature sets.
+- The test suite covers JSEP, media, TURN framing, DTMF, and post-quantum DTLS between engines for every policy pair. CI runs it on every push and pull request (`.github/workflows/ci.yml`), on x86_64 and aarch64 Linux and aarch64 macOS, with the default, pure Rust and classical-only feature sets.
+- CI also runs `rustfmt`, `clippy` with warnings as errors, an MSRV build, a check that the pure Rust builds contain no C code, and interoperability tests against OpenSSL 3.5 and headless Chromium (DTLS 1.2, and DTLS 1.3 with X25519MLKEM768).
+- Dependencies are checked against the RustSec advisory database with cargo-deny on every push and weekly. Each ignored advisory is justified in `deny.toml`. CI fails when `sbom/qrtc.cdx.json` no longer matches `Cargo.lock`.
+- Releases are built from signed tags. Each carries the source archive, the SBOM and SHA-256 sums, with build provenance attestations (`.github/workflows/release.yml`).
 - Browser, SFU, Matrix and TURN server interoperability is tested in tauri-plugin-webrtc before each release of the plugin.
 - Patches to vendored crates are listed in each crate's `PATCHES.md` and are proposed upstream.
 - The engine uses no `unsafe` code of its own and no `-sys` crates. Dependencies are kept minimal. Known-vulnerable dependencies are removed or updated when advisories are published.
@@ -58,6 +61,7 @@ A manufacturer that integrates qrtc into a product it places on the market must 
 | Cryptography | RustCrypto for DTLS, SRTP and certificates; rustls for TURN over TLS (ring or RustCrypto provider); ML-KEM from moduletto or RustCrypto ml-kem for X25519MLKEM768 |
 | Validation | Not validated under FIPS 140-3 (CMVP) or any other certification scheme |
 | Third-party material | str0m, str0m-proto, is, str0m-rust-crypto and dimpl, vendored with the patches listed in `vendor/*/PATCHES.md` |
+| SBOM | `sbom/qrtc.cdx.json`, CycloneDX 1.5, default build; attached to each release |
 | Vulnerability reports | GitHub private vulnerability reporting on this repository |
 
 ## What would change this
