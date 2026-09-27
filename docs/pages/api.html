@@ -1,0 +1,94 @@
+<!-- title: Using the API -->
+<!-- nav: Using the API -->
+<!-- order: 5 -->
+<h1>Using the API</h1>
+<p class="lead">The API mirrors <code>RTCPeerConnection</code>, with one difference in shape: media arrives already encoded (video) or as PCM (audio), and events arrive through a single callback. The generated reference is under <a href="api/qrtc/index.html">API reference</a>.</p>
+
+<h2>Engine and peer</h2>
+<p>Create one <code>NativeEngine</code> per process. It owns a private tokio runtime, so the consumer needs no runtime of its own. Each <code>create_peer</code> call starts one driver task.</p>
+<pre><code>use qrtc::{native::NativeEngine, PeerEngine, PeerEvent, RtcConfiguration};
+use std::sync::Arc;
+
+let engine = NativeEngine::new()?;
+let config: RtcConfiguration = serde_json::from_str(r#"{
+    "iceServers": [{ "urls": "turns:turn.example.org:443", "username": "u", "credential": "p" }],
+    "postQuantum": "prefer"
+}"#)?;
+let peer = engine.create_peer(&amp;config, Arc::new(|event: PeerEvent| {
+    // Called on engine threads, in order for this peer connection.
+}))?;</code></pre>
+<p>Every <code>Peer</code> method blocks until the driver answers. From async code, call them on a blocking pool such as <code>tokio::task::spawn_blocking</code>.</p>
+
+<h2>Configuration</h2>
+<p><code>RtcConfiguration</code> deserializes from the JSON a page passes to <code>new RTCPeerConnection()</code>, with two additions.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Field (JSON)</th><th>Meaning</th></tr></thead>
+  <tbody>
+    <tr><td><code>iceServers</code></td><td>STUN and TURN servers. <code>urls</code> is a string or an array; <code>turn:</code> with <code>?transport=tcp</code>, and <code>turns:</code>, use a stream.</td></tr>
+    <tr><td><code>iceTransportPolicy</code></td><td><code>"all"</code> or <code>"relay"</code></td></tr>
+    <tr><td><code>bundlePolicy</code></td><td><code>"balanced"</code>, <code>"max-compat"</code> or <code>"max-bundle"</code></td></tr>
+    <tr><td><code>videoCodecs</code></td><td>Not W3C. Video codecs the consumer can encode and decode: <code>"vp8"</code>, <code>"h264"</code>. Absent means VP8 only.</td></tr>
+    <tr><td><code>postQuantum</code></td><td>Not W3C. <code>"off"</code>, <code>"prefer"</code> or <code>"require"</code>; see <a href="post-quantum.html#policies">policies</a>. Absent means <code>default_pq_policy()</code>.</td></tr>
+  </tbody>
+</table></div>
+
+<h2>A connection, step by step</h2>
+<ol>
+  <li><strong>Describe transceivers.</strong> Call <code>upsert_transceiver</code> with a whole <code>TransceiverSpec</code> each time one changes: id, kind, direction, stream ids, sender track id, whether <code>addTrack</code> made it, codec preferences. The consumer picks ids below <code>REMOTE_TX_BASE</code> (<code>0x8000_0000</code>); the engine numbers transceivers that a remote offer creates from there up.</li>
+  <li><strong>Open data channels.</strong> <code>create_data_channel</code> returns a <code>DataChannelInfo</code> with an opaque <code>DcHandle</code>. The SCTP id may still be unknown; <code>PeerEvent::DcOpen</code> carries it.</li>
+  <li><strong>Negotiate.</strong> <code>create_offer</code>, <code>set_local_description</code>, then send the SDP through your signalling. On the other side, <code>set_remote_description</code>, <code>create_answer</code>, <code>set_local_description</code>. Both setters return a <code>TransceiverState</code> per transceiver: mid, current and remote direction, remote stream and track ids. Use them to fire <code>track</code> and <code>removetrack</code>.</li>
+  <li><strong>Trickle candidates.</strong> <code>PeerEvent::IceCandidate</code> gives local candidates, then <code>None</code> at the end. Remote ones go to <code>add_ice_candidate</code>.</li>
+  <li><strong>Send media.</strong> Push 48 kHz mono PCM with <code>push_pcm</code> for an audio sender; send encoded video with <code>send_frame</code>. Received audio arrives as <code>PeerEvent::AudioPcm</code>, received video as <code>PeerEvent::MediaFrame</code>.</li>
+  <li><strong>Close.</strong> <code>close()</code> stops the driver and releases its sockets.</li>
+</ol>
+
+<h2>Events</h2>
+<p><code>PeerEvent</code> serializes with a <code>type</code> tag named after the W3C event it drives. The media and message variants skip serialization: they carry bytes, so a consumer handles them directly.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Variant</th><th>W3C counterpart</th></tr></thead>
+  <tbody>
+    <tr><td><code>IceCandidate</code></td><td><code>icecandidate</code></td></tr>
+    <tr><td><code>IceGatheringStateChange</code>, <code>IceConnectionStateChange</code>, <code>ConnectionStateChange</code>, <code>SignalingStateChange</code></td><td>The matching <code>*statechange</code> events</td></tr>
+    <tr><td><code>NegotiationNeeded</code></td><td><code>negotiationneeded</code></td></tr>
+    <tr><td><code>DataChannel</code>, <code>DcOpen</code>, <code>DcClose</code>, <code>DcError</code>, <code>DcBufferedAmountLow</code>, <code>DcMessage</code></td><td><code>datachannel</code>, and the channel's <code>open</code>, <code>close</code>, <code>error</code>, <code>bufferedamountlow</code>, <code>message</code></td></tr>
+    <tr><td><code>MediaFrame</code>, <code>AudioPcm</code></td><td>What a receiver's track carries</td></tr>
+    <tr><td><code>KeyframeRequest</code>, <code>TargetBitrate</code></td><td>Encoder feedback, no event</td></tr>
+    <tr><td><code>EncodedOut</code></td><td>Frames for an <code>RTCRtpScriptTransform</code></td></tr>
+  </tbody>
+</table></div>
+
+<h2>Audio controls</h2>
+<ul>
+  <li><code>set_audio_processing(tx, echo_cancellation, noise_suppression, auto_gain_control)</code> follows the track's constraints. Browsers process microphone tracks only.</li>
+  <li><code>insert_dtmf(tx, event, duration_ms)</code> sends one RFC 4733 tone. Events 0 to 15 are the digits, <code>*</code>, <code>#</code> and A to D.</li>
+  <li><code>set_transform(tx, send, recv)</code> diverts Opus frames through the consumer: outgoing ones as <code>EncodedOut</code>, to come back with <code>send_frame</code>; incoming ones as <code>MediaFrame</code>, to come back with <code>decode_audio</code>.</li>
+</ul>
+
+<h2>Errors</h2>
+<p>Every fallible method returns <code>qrtc::Error</code>. <code>dom_name()</code> gives the DOMException name to throw:</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Variant</th><th>DOMException</th><th>Typical cause</th></tr></thead>
+  <tbody>
+    <tr><td><code>InvalidState</code></td><td><code>InvalidStateError</code></td><td>Wrong signalling state, closed connection</td></tr>
+    <tr><td><code>Operation</code></td><td><code>OperationError</code></td><td>The engine could not complete the step</td></tr>
+    <tr><td><code>NotSupported</code></td><td><code>NotSupportedError</code></td><td>A post-quantum policy without a post-quantum feature</td></tr>
+    <tr><td><code>Syntax</code></td><td><code>SyntaxError</code></td><td>Malformed SDP, candidate or ICE server URL</td></tr>
+    <tr><td><code>InvalidModification</code></td><td><code>InvalidModificationError</code></td><td>A local description edited structurally</td></tr>
+  </tbody>
+</table></div>
+
+<h2>Cargo features</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Feature</th><th>Default</th><th>Effect</th></tr></thead>
+  <tbody>
+    <tr><td><code>turn-tls-ring</code></td><td>yes</td><td>TURN over TLS with rustls on ring (compiles C and assembly)</td></tr>
+    <tr><td><code>turn-tls-rustcrypto</code></td><td>no</td><td>TURN over TLS with rustls on RustCrypto; no C in the build</td></tr>
+    <tr><td><code>pq-moduletto</code></td><td>yes</td><td>Post-quantum groups with moduletto ML-KEM, plus the ML-KEM-512 groups</td></tr>
+    <tr><td><code>pq-hybrid</code></td><td>no</td><td>Post-quantum groups with RustCrypto ml-kem</td></tr>
+  </tbody>
+</table></div>
+<p>A fully pure Rust build: <code>default-features = false, features = ["turn-tls-rustcrypto", "pq-hybrid"]</code>. With no TLS feature, <code>turns:</code> servers are skipped. With no post-quantum feature, DTLS stays at 1.2.</p>
+
+<h2>A runnable peer</h2>
+<p><code>examples/stdio_peer.rs</code> is a complete peer that speaks JSON lines on standard input and output. The Chromium interop test drives it; it is also the shortest full example of the API.</p>
+<pre><code>cargo run --example stdio_peer</code></pre>

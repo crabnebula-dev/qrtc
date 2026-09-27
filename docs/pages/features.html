@@ -1,0 +1,68 @@
+<!-- title: Features in depth -->
+<!-- order: 3 -->
+<h1>Features in depth</h1>
+<p class="lead">How each area of the engine works, the choices behind it, and what it does not do yet.</p>
+
+<h2 id="jsep">JSEP and negotiation</h2>
+<ul>
+  <li><strong>Offers and answers.</strong> <code>create_offer</code>, <code>create_answer</code>, <code>set_local_description</code> and <code>set_remote_description</code> follow the JSEP state machine, including <code>pranswer</code> and <code>rollback</code>.</li>
+  <li><strong>Perfect negotiation.</strong> A remote offer received while a local offer is pending implicitly rolls the local offer back, as the W3C perfect negotiation pattern expects.</li>
+  <li><strong>Re-offers.</strong> <code>create_offer</code> on an unchanged session returns an offer, which LiveKit and perfect negotiation depend on (a str0m patch).</li>
+  <li><strong>ICE restart.</strong> <code>restart_ice</code> makes the next offer restart ICE.</li>
+  <li><strong>Codec preferences.</strong> A transceiver's <code>codec_preferences</code> reorder and filter the payload list. RED, ULPFEC, FlexFEC, comfort noise and telephone events stay, after the preferred codecs.</li>
+  <li><strong>Transceivers.</strong> The consumer describes each transceiver whole (<code>TransceiverSpec</code>) and the engine upserts it. Setting a description returns <code>TransceiverState</code> for each, with the facts a consumer needs to fire <code>track</code> and update <code>currentDirection</code>.</li>
+</ul>
+<p>Errors map to DOMException names through <code>Error::dom_name</code>: <code>InvalidStateError</code>, <code>OperationError</code>, <code>NotSupportedError</code>, <code>SyntaxError</code> and <code>InvalidModificationError</code>.</p>
+
+<h2 id="ice">ICE, STUN and TURN</h2>
+<ul>
+  <li><strong>Candidates.</strong> Host candidates from one socket per interface, server-reflexive candidates through STUN, relayed candidates through TURN. <code>iceTransportPolicy: "relay"</code> keeps only relayed candidates.</li>
+  <li><strong>mDNS.</strong> Remote <code>.local</code> candidates are resolved with a one-shot multicast query (RFC 6762) before they reach the ICE agent.</li>
+  <li><strong>TURN client.</strong> A sans-I/O state machine (RFC 8656) with long-term credentials. Permissions are installed on demand and refreshed every 240 s; channels are bound once the permission exists and refreshed every 540 s; the allocation is refreshed before it expires.</li>
+  <li><strong>Transports.</strong> TURN runs over UDP, over TCP (<code>?transport=tcp</code>), or over TLS (<code>turns:</code>). Over a stream, STUN messages and ChannelData frames are framed per RFC 6062, with ChannelData padded to four bytes. Over UDP, requests are retransmitted from 500 ms, six times; over a stream, a transaction fails after 39.5 s.</li>
+  <li><strong>TURN over TLS.</strong> rustls with the <code>turn-tls-ring</code> or <code>turn-tls-rustcrypto</code> provider. The server certificate is checked against the platform trust store, with Mozilla's roots as the fallback. Without either feature, <code>turns:</code> servers are skipped.</li>
+</ul>
+
+<h2 id="dtls">DTLS and SRTP</h2>
+<p>str0m runs DTLS and SRTP on RustCrypto. The DTLS certificate is a self-signed ECDSA P-256 certificate built with RustCrypto, so no C library is involved. Its fingerprint travels in the SDP, and the peer checks it.</p>
+<p>With a post-quantum feature, a connection negotiates DTLS 1.3 with a hybrid ML-KEM group when the peer supports it. <a href="post-quantum.html">Post-quantum key agreement</a> covers the groups, the policies and the DTLS changes.</p>
+
+<h2 id="data">Data channels</h2>
+<ul>
+  <li>Reliable or unreliable (<code>max_retransmits</code> or <code>max_packet_life_time</code>), ordered or unordered, with a protocol string.</li>
+  <li>Negotiated channels with an explicit <code>id</code>, or in-band channels announced to the remote peer (RFC 8832).</li>
+  <li>A channel is known by an opaque <code>DcHandle</code>, because its SCTP stream id may be unknown until the DTLS role is settled.</li>
+  <li><code>dc_buffered_amount</code> and <code>dc_set_buffered_amount_low_threshold</code> back <code>bufferedAmount</code> and the <code>bufferedamountlow</code> event.</li>
+  <li>Messages arrive as <code>PeerEvent::DcMessage</code> with a text or binary <code>Payload</code>.</li>
+</ul>
+
+<h2 id="audio">Audio</h2>
+<p>Audio is processed in the engine, because echo cancellation needs the signal being played out as its far-end reference.</p>
+<ul>
+  <li><strong>Capture.</strong> The consumer pushes 48 kHz mono PCM per sender (<code>push_pcm</code>). Each 10 ms frame runs through that sender's audio processing: AEC3 echo cancellation, noise suppression and AGC2 from sonora, a pure Rust port of WebRTC's audio processing. Every 20 ms the result is Opus-encoded (rusty-opus) with in-band FEC, and sent as RTP.</li>
+  <li><strong>Processing follows the track.</strong> As in browsers, a microphone track is processed and a WebAudio or file track is sent untouched (<code>set_audio_processing</code>).</li>
+  <li><strong>Receive.</strong> Each remote track has a jitter queue. Its target starts at 40 ms and adapts between 30 and 160 ms: it grows by 20 ms on an underrun, and shrinks by 10 ms after ten seconds without one. An underrun is masked by fading out the last frame played. A lost packet is recovered from the next packet's in-band FEC, or concealed.</li>
+  <li><strong>Playout.</strong> One 10 ms clock pops a frame per track, mixes them, feeds the mix to every sender's echo canceller, and hands each track's PCM to the consumer (<code>PeerEvent::AudioPcm</code>).</li>
+  <li><strong>DTMF.</strong> <code>insert_dtmf</code> sends one tone as RFC 4733 telephone events and keeps RFC 4733's 50 ms gap. The caller, such as an <code>RTCDTMFSender</code>, handles the timing between tones.</li>
+  <li><strong>Encoded transforms.</strong> <code>set_transform</code> routes a transceiver's Opus frames through the consumer, as <code>PeerEvent::EncodedOut</code> before sending and back through <code>decode_audio</code> after receiving. This is how an <code>RTCRtpScriptTransform</code>, such as LiveKit's end-to-end encryption, sees audio.</li>
+</ul>
+
+<h2 id="video">Video</h2>
+<ul>
+  <li><strong>Encoding stays with the consumer.</strong> The consumer sends encoded frames (<code>send_frame</code>) and receives them (<code>PeerEvent::MediaFrame</code>). A web page can use WebCodecs; a browser engine can use its own codecs.</li>
+  <li><strong>VP8</strong> always. Each payload descriptor carries a 15-bit PictureID, as browsers write it; LiveKit's SFU does not forward VP8 without one (a str0m patch).</li>
+  <li><strong>H.264</strong> when the configuration lists it in <code>video_codecs</code>: packetization mode 1, offered as constrained baseline, baseline, main and high at level 3.1.</li>
+  <li><strong>Bandwidth.</strong> Transport-wide congestion control estimates the available bitrate from 800 kbps; <code>PeerEvent::TargetBitrate</code> tells the consumer's encoder what to aim for.</li>
+  <li><strong>Keyframes.</strong> <code>request_keyframe</code> sends PLI to the remote sender; a remote request arrives as <code>PeerEvent::KeyframeRequest</code>.</li>
+</ul>
+
+<h2 id="stats">Stats</h2>
+<p><code>stats()</code> returns <code>RTCStatsReport</code>-shaped JSON entries: <code>peer-connection</code> (data channels opened), <code>transport</code> (DTLS state and <code>tlsGroup</code>), <code>candidate-pair</code> (state, nomination, round-trip time, bytes), and <code>local-candidate</code> and <code>remote-candidate</code>. RTP stream stats come from the consumer, which sees the frames.</p>
+
+<h2 id="not-yet">Not yet</h2>
+<ul>
+  <li>VP9 and AV1.</li>
+  <li>Receive-side simulcast layers; a sender sends one layer.</li>
+  <li><code>inbound-rtp</code> and <code>outbound-rtp</code> stats inside the engine.</li>
+  <li>With the <code>require</code> policy, a peer without post-quantum groups fails by timeout rather than with an explicit error.</li>
+</ul>

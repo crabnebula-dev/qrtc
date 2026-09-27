@@ -1,0 +1,72 @@
+<!-- title: Post-quantum key agreement -->
+<!-- nav: Post-quantum -->
+<!-- order: 4 -->
+<h1>Post-quantum key agreement</h1>
+<p class="lead">qrtc agrees the keys of DTLS 1.3 (media and data channels) and of TURN over TLS with hybrid X25519MLKEM768, the group browsers and TLS servers negotiate. A recording of today's traffic stays confidential even against a future quantum computer, as long as either half of the hybrid holds.</p>
+
+<div class="note">Only the key exchange is post-quantum. Peers still authenticate with ECDSA certificates whose fingerprints travel in the signalling, as in every WebRTC stack today.</div>
+
+<h2>How a hybrid group works</h2>
+<p>Every group here is a key encapsulation mechanism (KEM) in the TLS 1.3 sense. The client sends an encapsulation key, the server answers with a ciphertext, and both derive the same secret. A hybrid group runs ML-KEM (FIPS 203) and X25519 side by side, following draft-ietf-tls-ecdhe-mlkem:</p>
+<ul>
+  <li>client share: ML-KEM encapsulation key, then the X25519 public key;</li>
+  <li>server share: ML-KEM ciphertext, then the X25519 public key;</li>
+  <li>shared secret: the ML-KEM secret, then the X25519 secret.</li>
+</ul>
+
+<h2>Groups</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Group</th><th>Codepoint</th><th>Feature</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>X25519MLKEM768</code></td><td>0x11ec</td><td>both</td><td>What browsers and TLS servers negotiate. Offered first.</td></tr>
+    <tr><td><code>X25519MLKEM512</code></td><td>0xfe5c (private use)</td><td><code>pq-moduletto</code></td><td>NIST category 1 instead of 3. Only qrtc knows it; offered after 768, so only a peer without 768 picks it. Never used for TURN.</td></tr>
+    <tr><td><code>MLKEM768</code></td><td>0x0201</td><td>both</td><td>ML-KEM-768 alone.</td></tr>
+    <tr><td><code>MLKEM512</code></td><td>0x0200</td><td><code>pq-moduletto</code></td><td>ML-KEM-512 alone. DTLS only.</td></tr>
+  </tbody>
+</table></div>
+
+<h3>Two ML-KEM backends</h3>
+<p>Both are pure Rust and differ only in where ML-KEM comes from:</p>
+<ul>
+  <li><code>pq-moduletto</code>, the default: <a href="https://github.com/crabnebula-dev/moduletto">moduletto</a>, CrabNebula's ML-KEM-512 and ML-KEM-768 with NEON on aarch64. It passes every NIST ACVP vector, including the key-check groups, and decapsulates RustCrypto's output and the reverse.</li>
+  <li><code>pq-hybrid</code>: RustCrypto <a href="https://crates.io/crates/ml-kem">ml-kem</a>, for ML-KEM-768.</li>
+</ul>
+<p>With both features on, moduletto wins.</p>
+
+<h2 id="policies">Policies</h2>
+<p>Each connection picks a policy with <code>RtcConfiguration::post_quantum</code> (<code>postQuantum</code> in JSON). Without one, the engine uses <code>prefer</code> when built with a post-quantum feature and <code>off</code> otherwise.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Policy</th><th>DTLS</th><th>TURN over TLS</th></tr></thead>
+  <tbody>
+    <tr><td><code>off</code></td><td>DTLS 1.2, classical groups</td><td>Classical groups</td></tr>
+    <tr><td><code>prefer</code></td><td>Auto-senses the version: DTLS 1.3 with X25519MLKEM768 when the peer supports it, DTLS 1.2 otherwise</td><td>X25519MLKEM768 and MLKEM768 first, classical groups after</td></tr>
+    <tr><td><code>require</code></td><td>DTLS 1.3 with post-quantum groups only</td><td>TLS 1.3 with post-quantum groups only</td></tr>
+  </tbody>
+</table></div>
+<p>Under <code>prefer</code>, the ClientHello offers DTLS 1.2 and 1.3 with the hybrid share, and the peer's answer decides the version. When qrtc is the DTLS server, the peer's ClientHello decides. Setting a policy other than <code>off</code> without a post-quantum feature is a <code>NotSupportedError</code>.</p>
+
+<h2>What had to change in DTLS</h2>
+<p>str0m's DTLS library, dimpl, knew only Diffie-Hellman groups. qrtc vendors it with six patches, all meant for upstream (<a href="patches.html#dimpl">details</a>):</p>
+<ol>
+  <li><strong>Named groups.</strong> ML-KEM and hybrid codepoints, and a supported-groups list that grows from 4 to 10 entries.</li>
+  <li><strong>Server-side key exchange in one step.</strong> A KEM server cannot produce its share before it has the client's, because its share is a ciphertext for the client's key.</li>
+  <li><strong>KEM groups kept out of DTLS 1.2</strong>, where the server sends its share first.</li>
+  <li><strong>Provider validation</strong> that exercises both kinds of group.</li>
+  <li><strong>Fragmented ClientHello.</strong> A hybrid ClientHello is about 1.4 kB, above the DTLS MTU, so it is split into MTU-sized records (RFC 9147 section 5.5).</li>
+  <li><strong>Fragmented ServerHello detection.</strong> A ServerHello split over several records carries a large key share, so it is DTLS 1.3.</li>
+</ol>
+
+<h2>Seeing the result</h2>
+<p><code>stats()</code> reports the negotiated group as the transport's <code>tlsGroup</code>, for example <code>"X25519MLKEM768"</code>. It is absent after a classical DTLS 1.2 handshake.</p>
+
+<h2>Interoperability</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Peer</th><th>Result</th></tr></thead>
+  <tbody>
+    <tr><td>qrtc, every policy pair, both backends</td><td>Unit tests: <code>require</code> fails against <code>off</code>, every other pair connects, with a hybrid group whenever both sides have one</td></tr>
+    <tr><td>Chromium 141 with <code>WebRTC-ForceDtls13</code> and <code>WebRTC-EnableDtlsPqc</code></td><td>DTLS 1.3 with X25519MLKEM768, both offer directions, under <code>prefer</code> and <code>require</code></td></tr>
+    <tr><td>Chromium 141 without flags</td><td>DTLS 1.2 under <code>prefer</code>; no connection under <code>require</code></td></tr>
+    <tr><td>OpenSSL 3.5 TLS server accepting only X25519MLKEM768</td><td>TURN over TLS connects with both backends and both rustls providers</td></tr>
+  </tbody>
+</table></div>
+<p>CI runs the Chromium and OpenSSL checks on every push; see <a href="testing.html">Testing and CI</a>.</p>

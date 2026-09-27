@@ -1,0 +1,51 @@
+<!-- title: Overview -->
+<!-- order: 1 -->
+<h1>qrtc</h1>
+<p class="lead">A pure Rust WebRTC engine with hybrid post-quantum key agreement. qrtc implements the network side of a peer connection behind two traits, so an application or browser can expose it as the W3C <code>RTCPeerConnection</code> API.</p>
+
+<div class="cards">
+  <div class="card"><strong>Pure Rust</strong><span>No libwebrtc, no GStreamer, no system packages. With <code>turn-tls-rustcrypto</code> the build compiles no C.</span></div>
+  <div class="card"><strong>Post-quantum</strong><span>DTLS 1.3 and TURN over TLS with X25519MLKEM768, interoperable with Chromium and OpenSSL 3.5.</span></div>
+  <div class="card"><strong>Real stacks</strong><span>Tested against Chromium, LiveKit with E2EE, matrix-js-sdk calls and coturn.</span></div>
+  <div class="card"><strong>Two consumers</strong><span>tauri-plugin-webrtc for WebKitGTK apps, and formal-web as a native browser engine.</span></div>
+</div>
+
+<h2>What it covers</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Area</th><th>Coverage</th></tr></thead>
+  <tbody>
+    <tr><td>JSEP</td><td>Offers, answers, renegotiation, rollback and perfect negotiation, ICE restart, <code>setCodecPreferences</code></td></tr>
+    <tr><td>ICE</td><td>Host candidates, mDNS <code>.local</code> resolution, STUN, TURN over UDP, TCP and TLS, relay-only policy</td></tr>
+    <tr><td>DTLS</td><td>DTLS 1.2, or DTLS 1.3 with post-quantum key exchange groups</td></tr>
+    <tr><td>Data channels</td><td>Reliable and unreliable, ordered and unordered, negotiated ids, buffered-amount events</td></tr>
+    <tr><td>Audio</td><td>Opus with in-band FEC, AEC3 echo cancellation, noise suppression and AGC, adaptive jitter buffer, one playout clock, DTMF (RFC 4733)</td></tr>
+    <tr><td>Video</td><td>VP8 and H.264 transport, keyframe requests, bandwidth estimation; the consumer encodes and decodes</td></tr>
+    <tr><td>Encoded transforms</td><td>Hooks for <code>RTCRtpScriptTransform</code>, used for LiveKit end-to-end encryption</td></tr>
+    <tr><td>Stats</td><td>Peer connection, transport (DTLS state, <code>tlsGroup</code>), candidate pairs, local and remote candidates</td></tr>
+  </tbody>
+</table></div>
+
+<h2>Quick start</h2>
+<pre><code>[dependencies]
+qrtc = { git = "https://github.com/crabnebula-dev/qrtc", branch = "main" }</code></pre>
+<pre><code>use qrtc::{native::NativeEngine, PeerEngine, RtcConfiguration};
+use std::sync::Arc;
+
+let engine = NativeEngine::new()?;
+let peer = engine.create_peer(
+    &amp;RtcConfiguration::default(),
+    Arc::new(|event| println!("{event:?}")),
+)?;
+let offer = peer.create_offer()?;
+peer.set_local_description(&amp;offer)?;</code></pre>
+<p>Every method blocks. On an async runtime, call them from a blocking pool. Events arrive in order per peer connection, on engine threads. <a href="api.html">Using the API</a> walks through a whole connection.</p>
+
+<h2>Where to go next</h2>
+<ul>
+  <li><a href="architecture.html">Architecture</a>: the driver task, sockets, and how str0m fits in.</li>
+  <li><a href="features.html">Features in depth</a>: how each area works and what it does not do yet.</li>
+  <li><a href="post-quantum.html">Post-quantum key agreement</a>: groups, policies and the DTLS changes behind them.</li>
+  <li><a href="patches.html">Vendored crates</a>: what qrtc changes in str0m and dimpl, and why.</li>
+  <li><a href="testing.html">Testing and CI</a>: unit tests, interop suites and release checks.</li>
+  <li><a href="security.html">Security and compliance</a>: advisories, SBOM and the steward statement.</li>
+</ul>

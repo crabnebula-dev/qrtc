@@ -3,6 +3,9 @@
 Quantum realtime communication: a pure Rust WebRTC engine with hybrid
 post-quantum key agreement.
 
+Documentation: <https://crabnebula-dev.github.io/qrtc/>, with the features in
+depth, the post-quantum design, the vendored patches and the API reference.
+
 qrtc implements the peer-connection side of WebRTC behind two traits,
 [`PeerEngine`](src/lib.rs) and [`Peer`](src/lib.rs). A consumer exposes them
 as the W3C `RTCPeerConnection` API. Two consumers are planned or shipping:
@@ -24,7 +27,7 @@ as the W3C `RTCPeerConnection` API. Two consumers are planned or shipping:
 | Audio | Opus (rusty-opus), AEC3, noise suppression and AGC (sonora), jitter buffer, in-band FEC, DTMF (RFC 4733) |
 | Video | VP8 and H.264 packetization; the consumer encodes and decodes |
 | Encoded transforms | Hooks for `RTCRtpScriptTransform` (LiveKit E2EE) |
-| Stats | Candidate pairs, `inbound-rtp`, `outbound-rtp`, transport `tlsGroup` |
+| Stats | Peer connection, transport (DTLS state, `tlsGroup`), candidate pairs, local and remote candidates |
 
 With `turn-tls-rustcrypto` the build compiles no C code. Its only `-sys`
 crates bind the platform's own APIs for the certificate store (Windows,

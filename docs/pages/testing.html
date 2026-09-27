@@ -1,0 +1,62 @@
+<!-- title: Testing and CI -->
+<!-- nav: Testing and CI -->
+<!-- order: 7 -->
+<h1>Testing and CI</h1>
+<p class="lead">Unit tests run two engines against each other in one process. Interop tests put qrtc against Chromium and OpenSSL. The full browser, SFU and Matrix matrix runs in tauri-plugin-webrtc, where a real page drives the engine.</p>
+
+<h2>Unit tests</h2>
+<pre><code>cargo test --lib</code></pre>
+<div class="table-wrap"><table>
+  <thead><tr><th>Area</th><th>Tests</th></tr></thead>
+  <tbody>
+    <tr><td>JSEP</td><td>Section parsing, direction and msid rewrites, codec preference filtering, accepted fmtp edits, refused structural edits, glare rollback of the polite offer, explicit rollback, re-offer of an unchanged session</td></tr>
+    <tr><td>Data channels</td><td>Loopback between two engines</td></tr>
+    <tr><td>Media</td><td>Video both ways with msid; DTMF between engines</td></tr>
+    <tr><td>Audio</td><td>Opus round trip keeps a tone; unprocessed capture keeps its level; the echo canceller removes echo and does not inject the far end</td></tr>
+    <tr><td>STUN and TURN</td><td>Message integrity and fingerprint, XOR addresses, ChannelData, stream framing with padding, ICE server URLs</td></tr>
+    <tr><td>Post-quantum</td><td>DTLS between engines for every policy pair; every group agrees; malformed shares are refused; moduletto and RustCrypto ML-KEM decapsulate each other's output</td></tr>
+  </tbody>
+</table></div>
+
+<h2>Interop tests</h2>
+<h3>Chromium</h3>
+<pre><code>cargo build --example stdio_peer
+cd tests &amp;&amp; npm ci &amp;&amp; npx playwright-core install chromium &amp;&amp; cd ..
+node tests/chromium-interop.mjs</code></pre>
+<p>Headless Chromium and the <code>stdio_peer</code> example open data channels both ways. Each case also checks the DTLS group each side agreed:</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Case</th><th>Chromium</th><th>qrtc</th><th>Expected</th></tr></thead>
+  <tbody>
+    <tr><td><code>classical</code></td><td>Default</td><td><code>prefer</code></td><td>DTLS 1.2, no post-quantum group</td></tr>
+    <tr><td><code>pq</code></td><td>DTLS 1.3 and post-quantum field trials</td><td><code>prefer</code></td><td>X25519MLKEM768, both offer directions</td></tr>
+    <tr><td><code>pq-require</code></td><td>Same</td><td><code>require</code></td><td>X25519MLKEM768</td></tr>
+    <tr><td><code>require-fail</code></td><td>Default</td><td><code>require</code></td><td>No connection</td></tr>
+  </tbody>
+</table></div>
+<h3>OpenSSL</h3>
+<pre><code>node tests/pq-tls-interop.mjs pq-moduletto
+node tests/pq-tls-interop.mjs pq-hybrid</code></pre>
+<p>The engine's TURN over TLS client connects to an OpenSSL 3.5 server (Node's TLS) that accepts only X25519MLKEM768.</p>
+
+<h2>CI</h2>
+<p><code>.github/workflows/ci.yml</code> runs on every push and pull request, and weekly. Actions are pinned by commit.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>Job</th><th>What it checks</th></tr></thead>
+  <tbody>
+    <tr><td>lint</td><td><code>rustfmt</code>; <code>clippy</code> with warnings as errors on every feature set; rustdoc warnings</td></tr>
+    <tr><td>test</td><td>Unit tests and examples on x86_64 Linux, aarch64 Linux (moduletto's NEON path) and aarch64 macOS, each with the default, pure Rust and classical feature sets</td></tr>
+    <tr><td>windows</td><td>Unit tests on Windows; reported, not blocking, until verified</td></tr>
+    <tr><td>msrv</td><td>Builds with Rust 1.91</td></tr>
+    <tr><td>pure-rust</td><td>The pure Rust build contains no crate that compiles C: no <code>cc</code>, <code>cmake</code>, <code>bindgen</code>, <code>pkg-config</code>, <code>vcpkg</code>, <code>ring</code>, <code>aws-lc</code> or <code>openssl-sys</code></td></tr>
+    <tr><td>supply-chain</td><td>cargo-deny: RustSec advisories, licences, sources, bans</td></tr>
+    <tr><td>sbom</td><td><code>sbom/qrtc.cdx.json</code> matches <code>Cargo.lock</code></td></tr>
+    <tr><td>interop-openssl</td><td>Post-quantum TURN over TLS against OpenSSL 3.5, both ML-KEM backends</td></tr>
+    <tr><td>interop-chromium</td><td>The four Chromium cases above</td></tr>
+  </tbody>
+</table></div>
+
+<h2>Releases</h2>
+<p><code>.github/workflows/release.yml</code> runs on a <code>v*</code> tag. It checks that the tag matches the crate version, runs the tests, and builds the SBOM, the source archive and SHA-256 sums. It attests build provenance for them and attaches them to a GitHub release. Tags and commits are signed.</p>
+
+<h2>Consumer tests</h2>
+<p>tauri-plugin-webrtc runs qrtc inside WebKitGTK against Chromium, LiveKit with end-to-end encryption, matrix-js-sdk voice and video calls, and coturn over UDP, TCP and TLS. Its <a href="https://crabnebula-dev.github.io/tauri-plugin-webrtc/testing.html">testing page</a> lists those suites.</p>

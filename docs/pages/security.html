@@ -1,0 +1,46 @@
+<!-- title: Security and compliance -->
+<!-- nav: Security and compliance -->
+<!-- order: 8 -->
+<h1>Security and compliance</h1>
+<p class="lead">CrabNebula stewards qrtc as free and open-source software under MIT OR Apache-2.0. This page summarises how it is built and maintained. <a href="https://github.com/crabnebula-dev/qrtc/blob/main/COMPLIANCE.md">COMPLIANCE.md</a> is the authoritative statement.</p>
+
+<h2>Reporting a vulnerability</h2>
+<p>Use GitHub's private vulnerability reporting on the repository (Security tab, "Report a vulnerability"). Please do not open a public issue. Reports are acknowledged within 5 working days, and a disclosure date is agreed with the reporter: by default 90 days after the report, or earlier once a fix is released.</p>
+
+<h2>Cyber Resilience Act</h2>
+<p>CrabNebula supplies qrtc outside any commercial activity, so under Regulation (EU) 2024/2847 it acts as an open-source software steward (Article 3(14)), not as a manufacturer. The steward obligations of Article 24 apply: a documented cybersecurity policy, cooperation with market surveillance authorities, and Article 14 reporting to the extent CrabNebula is involved.</p>
+<p>A manufacturer that integrates qrtc into a product on the market carries the CRA obligations for that product. It must exercise due diligence on qrtc as a component (Article 13(5)). COMPLIANCE.md has a table of the facts that due diligence needs.</p>
+
+<h2>What the build contains</h2>
+<ul>
+  <li>No <code>unsafe</code> code of qrtc's own.</li>
+  <li>With <code>turn-tls-rustcrypto</code>, no C code. The only <code>-sys</code> crates bind platform APIs: the Windows and Apple certificate stores.</li>
+  <li>Cryptography: RustCrypto for DTLS, SRTP and certificates; rustls for TURN over TLS; ML-KEM from moduletto or RustCrypto ml-kem.</li>
+  <li>Not validated under FIPS 140-3 or any other certification scheme.</li>
+</ul>
+
+<h2>Supply chain</h2>
+<ul>
+  <li><strong>SBOM.</strong> <code>sbom/qrtc.cdx.json</code>, CycloneDX 1.5, for the default build. CI fails when it drifts from <code>Cargo.lock</code>, and each release attaches it.</li>
+  <li><strong>Advisories.</strong> cargo-deny checks the RustSec database on every push and weekly. Each ignored advisory carries its reason in <code>deny.toml</code>.</li>
+  <li><strong>Provenance.</strong> Releases come from signed tags, with SHA-256 sums and GitHub build provenance attestations.</li>
+  <li><strong>Vendored code.</strong> Every change to a vendored crate is listed on <a href="patches.html">Vendored crates</a>.</li>
+</ul>
+
+<h3>Ignored advisories</h3>
+<div class="table-wrap"><table>
+  <thead><tr><th>Advisory</th><th>Crate</th><th>Why it does not apply</th></tr></thead>
+  <tbody>
+    <tr><td>RUSTSEC-2026-0049, -0098, -0099, -0104</td><td>rustls-webpki 0.102.8</td><td>Reached only through the pre-release <code>rustls-rustcrypto</code> provider, for algorithm id constants. Certificate path validation uses rustls-webpki 0.103.</td></tr>
+    <tr><td>RUSTSEC-2023-0071</td><td>rsa</td><td>A timing leak in RSA private-key operations. qrtc holds no RSA private key, and TURN over TLS uses no client certificate.</td></tr>
+    <tr><td>RUSTSEC-2024-0436</td><td>paste</td><td>Unmaintained proc-macro, build time only.</td></tr>
+  </tbody>
+</table></div>
+<p>All six come from the <code>turn-tls-rustcrypto</code> path. The default build with ring is not affected by them.</p>
+
+<h2>Protocol security notes</h2>
+<ul>
+  <li>DTLS peers authenticate by certificate fingerprint, carried in the SDP. The signalling channel must protect the SDP; Matrix and LiveKit do so with TLS and, for Matrix, end-to-end encryption.</li>
+  <li>Under <code>prefer</code>, an active attacker on the signalling path could strip post-quantum groups. That attacker can already replace the fingerprint. Use <code>require</code> when both ends are known to support the hybrid.</li>
+  <li>TURN over TLS checks the server certificate against the platform trust store, with Mozilla's roots as the fallback.</li>
+</ul>

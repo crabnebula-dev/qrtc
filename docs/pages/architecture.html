@@ -1,0 +1,73 @@
+<!-- title: Architecture -->
+<!-- order: 2 -->
+<h1>Architecture</h1>
+<p class="lead">Each peer connection is one task, the driver, on a private tokio runtime. The driver owns everything that mutates the connection, so the rules of the sans-I/O str0m stack hold in exactly one place.</p>
+
+<figure>
+  <svg viewBox="0 0 760 430" role="img" aria-label="qrtc architecture: consumer, peer handle, driver task, and network tasks">
+    <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0 0L10 5L0 10z"/></marker></defs>
+    <rect class="box" x="230" y="16" width="300" height="46" rx="8"/>
+    <text class="label" x="380" y="44" text-anchor="middle">Consumer (plugin, browser engine)</text>
+    <rect class="box" x="230" y="96" width="300" height="46" rx="8"/>
+    <text class="label" x="380" y="124" text-anchor="middle">NativePeer: blocking handle</text>
+    <rect class="box main" x="140" y="180" width="480" height="104" rx="10"/>
+    <text class="label" x="380" y="206" text-anchor="middle" font-weight="600">Driver task (one per peer connection)</text>
+    <text class="small" x="380" y="230" text-anchor="middle">str0m Rtc: ICE agent, DTLS, SRTP, SCTP, RTP</text>
+    <text class="small" x="380" y="250" text-anchor="middle">JSEP state, transceivers, data channel queues</text>
+    <text class="small" x="380" y="270" text-anchor="middle">audio: APM, Opus, jitter buffers, 10 ms playout clock</text>
+    <rect class="box" x="20" y="330" width="210" height="46" rx="8"/>
+    <text class="label" x="125" y="358" text-anchor="middle">UDP sockets per interface</text>
+    <rect class="box" x="275" y="330" width="210" height="46" rx="8"/>
+    <text class="label" x="380" y="358" text-anchor="middle">TURN: UDP, TCP, TLS tasks</text>
+    <rect class="box" x="530" y="330" width="210" height="46" rx="8"/>
+    <text class="label" x="635" y="358" text-anchor="middle">DNS and mDNS lookups</text>
+    <path class="edge" d="M360 62V94" marker-end="url(#a)"/>
+    <text class="small" x="352" y="84" text-anchor="end">commands</text>
+    <path class="edge" d="M360 142V178" marker-end="url(#a)"/>
+    <path class="edge" d="M560 178V34H532" marker-end="url(#a)"/>
+    <text class="small" x="568" y="110">events (EventSink)</text>
+    <path class="edge" d="M125 328V300H240V286" marker-end="url(#a)" marker-start="url(#a)"/>
+    <path class="edge" d="M380 328V286" marker-end="url(#a)" marker-start="url(#a)"/>
+    <path class="edge" d="M635 328V300H520V286" marker-end="url(#a)"/>
+    <text class="small" x="380" y="410" text-anchor="middle">every packet in or out passes through the driver</text>
+  </svg>
+  <figcaption>Commands go down through the handle; events come back through the consumer's sink, in order per connection.</figcaption>
+</figure>
+
+<h2>The two traits</h2>
+<p><code>PeerEngine</code> creates peer connections. <code>Peer</code> is one connection, with methods that mirror <code>RTCPeerConnection</code>: descriptions, candidates, data channels, transceivers, media frames, DTMF and stats. A consumer depends on the traits, so another engine could stand behind them. <code>native::NativeEngine</code> is the one qrtc ships.</p>
+
+<h2>The driver</h2>
+<p>The driver owns the <code>str0m::Rtc</code>, its sockets, the JSEP state and the data channel queues. Every mutation of the <code>Rtc</code> is followed by a drain step. The drain sends queued packets, delivers events and arms the next timeout. Work that may block, such as DNS resolution and mDNS lookups, runs as separate tasks that report back to the driver.</p>
+<p><code>NativePeer</code> is a cheap handle. Each method sends a command to the driver and waits for the answer, which is why every method blocks. Engine events reach the consumer's <code>EventSink</code> from engine threads, in order per peer connection.</p>
+
+<h2>Sockets and candidates</h2>
+<p>The engine binds one UDP socket per usable interface address, and each becomes a host candidate. Loopback is used only when nothing else exists, as in an isolated CI container. Server-reflexive candidates come from STUN Binding requests on those sockets. Relayed candidates come from TURN allocations over UDP, or over a stream to the TURN server when the URL asks for TCP or TLS.</p>
+<p>Remote <code>.local</code> host candidates, which browsers use to hide local addresses, are resolved with a one-shot mDNS query on 224.0.0.251:5353 before they reach the ICE agent.</p>
+
+<h2>The JSEP layer</h2>
+<p>str0m generates the SDP. qrtc rewrites only what W3C semantics decide and str0m cannot know:</p>
+<ul>
+  <li>the direction attribute of each media section, since an answer narrows str0m's maximal direction to the transceiver's;</li>
+  <li><code>a=msid</code>, carrying the page's MediaStream and track ids, which Matrix <code>sdp_stream_metadata</code> keys on;</li>
+  <li>the payload list, when the consumer called <code>setCodecPreferences()</code>.</li>
+</ul>
+<p>Setting a local description that differs from the last offer or answer is checked semantically, as Chrome and Safari do. Line order, whitespace, candidates and codec parameters may differ, because matrix-js-sdk re-serialises every local description. Structural edits are refused: setup role, ICE credentials, fingerprints, media sections and directions.</p>
+
+<h2>Media paths</h2>
+<p>Video is encoded and decoded by the consumer, for example with WebCodecs in a web page. The engine moves encoded frames: it packetizes them into RTP, reassembles received frames, and asks for keyframes. Audio is processed in the engine, because echo cancellation needs the far-end signal: the consumer pushes and receives 48 kHz PCM. <a href="features.html#audio">Audio</a> covers the details.</p>
+
+<h2>Where each piece lives</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>Module</th><th>Role</th></tr></thead>
+  <tbody>
+    <tr><td><code>native/mod.rs</code></td><td><code>NativeEngine</code>, <code>NativePeer</code> and the command channel</td></tr>
+    <tr><td><code>native/driver.rs</code></td><td>The per-connection driver</td></tr>
+    <tr><td><code>native/jsep.rs</code></td><td>SDP section parsing and the rewrites above</td></tr>
+    <tr><td><code>native/audio.rs</code></td><td>Opus, audio processing, jitter buffers, playout clock</td></tr>
+    <tr><td><code>native/net.rs</code></td><td>Interface discovery and host sockets</td></tr>
+    <tr><td><code>native/stun.rs</code>, <code>turn.rs</code>, <code>turn_stream.rs</code></td><td>STUN/TURN codec, TURN client state machine, TCP and TLS transports</td></tr>
+    <tr><td><code>native/mdns.rs</code></td><td>mDNS resolver for <code>.local</code> candidates</td></tr>
+    <tr><td><code>native/pq.rs</code></td><td>Post-quantum and hybrid key exchange groups</td></tr>
+  </tbody>
+</table></div>

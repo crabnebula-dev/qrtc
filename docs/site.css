@@ -1,0 +1,107 @@
+:root {
+  --bg: #fbfbfa;
+  --surface: #ffffff;
+  --text: #1c1d1f;
+  --muted: #5b5f66;
+  --line: #e3e3e0;
+  --accent: #0b6e69;
+  --accent-soft: #e3f1ef;
+  --code-bg: #f2f2ef;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131416;
+    --surface: #1a1c1f;
+    --text: #e6e6e3;
+    --muted: #a0a4ab;
+    --line: #2c2f33;
+    --accent: #5cc6bd;
+    --accent-soft: #16302e;
+    --code-bg: #202327;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.6 var(--sans);
+}
+a { color: var(--accent); text-underline-offset: 2px; }
+header { border-bottom: 1px solid var(--line); background: var(--surface); }
+.bar {
+  max-width: 1120px; margin: 0 auto; padding: 14px 16px;
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+}
+.brand { font-weight: 700; font-size: 1.2rem; color: var(--text); text-decoration: none; }
+.tag { color: var(--muted); font-size: 0.9rem; }
+.repo { margin-left: auto; font-size: 0.9rem; }
+.layout {
+  max-width: 1120px; margin: 0 auto; padding: 0 16px;
+  display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 40px;
+}
+nav {
+  position: sticky; top: 0; align-self: start;
+  display: flex; flex-direction: column; gap: 2px; padding: 28px 0;
+}
+nav a {
+  color: var(--muted); text-decoration: none; padding: 6px 10px; border-radius: 6px;
+  font-size: 0.95rem;
+}
+nav a:hover { color: var(--text); background: var(--code-bg); }
+nav a[aria-current="page"] { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+main { padding: 28px 0 64px; max-width: 76ch; min-width: 0; }
+h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 12px; letter-spacing: -0.01em; }
+h2 { font-size: 1.35rem; margin: 40px 0 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+h3 { font-size: 1.08rem; margin: 26px 0 6px; }
+p, ul, ol { margin: 0 0 14px; }
+main p, main li { overflow-wrap: anywhere; }
+li { margin: 4px 0; }
+.lead { font-size: 1.12rem; color: var(--muted); }
+code {
+  font-family: var(--mono); font-size: 0.88em; background: var(--code-bg);
+  padding: 1px 5px; border-radius: 4px;
+}
+pre {
+  background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px;
+  padding: 14px 16px; overflow-x: auto; font-size: 0.88rem; line-height: 1.5;
+}
+pre code { background: none; padding: 0; font-size: inherit; }
+.table-wrap { overflow-x: auto; margin: 0 0 18px; }
+table { border-collapse: collapse; width: 100%; font-size: 0.93rem; }
+th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+th { font-weight: 600; color: var(--muted); font-size: 0.85rem; text-transform: none; }
+.note {
+  border-left: 3px solid var(--accent); background: var(--accent-soft);
+  padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 0 0 16px;
+}
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin: 18px 0 24px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.card strong { display: block; margin-bottom: 4px; }
+.card span { color: var(--muted); font-size: 0.92rem; }
+figure { margin: 18px 0 24px; }
+figure svg { width: 100%; height: auto; display: block; }
+figcaption { color: var(--muted); font-size: 0.9rem; margin-top: 6px; }
+svg .box { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
+svg .box.main { fill: var(--accent-soft); stroke: var(--accent); }
+svg .label { fill: var(--text); font: 13px var(--sans); }
+svg .small { fill: var(--muted); font: 11.5px var(--sans); }
+svg .edge { stroke: var(--muted); stroke-width: 1.4; fill: none; }
+svg .arrowhead { fill: var(--muted); }
+footer {
+  border-top: 1px solid var(--line); color: var(--muted); font-size: 0.88rem;
+  padding: 18px 16px 28px; text-align: center;
+}
+@media (max-width: 760px) {
+  .layout { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  nav {
+    position: static; flex-direction: row; flex-wrap: wrap; padding: 12px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  nav a { padding: 4px 8px; font-size: 0.9rem; }
+  main { padding-top: 18px; }
+  h1 { font-size: 1.6rem; }
+}

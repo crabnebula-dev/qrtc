@@ -1,0 +1,45 @@
+<!-- title: Vendored crates -->
+<!-- nav: Vendored crates -->
+<!-- order: 6 -->
+<h1>Vendored crates</h1>
+<p class="lead">qrtc builds on str0m, a sans-I/O WebRTC stack, and on dimpl, its DTLS library. Both are vendored under <code>vendor/</code> with small patches, each listed in the crate's <code>PATCHES.md</code> and meant for upstream.</p>
+
+<h2>Why vendor</h2>
+<ul>
+  <li>Post-quantum DTLS needs changes inside dimpl's handshake, which a wrapper cannot reach.</li>
+  <li>Interoperability with LiveKit and perfect negotiation needs two behaviour changes in str0m.</li>
+  <li>Keeping the build free of C means replacing the one path that pulled in AWS-LC.</li>
+  <li>Path dependencies apply the patches to every project that depends on qrtc, with no <code>[patch]</code> section on their side.</li>
+</ul>
+<p>Only sources, manifests, licences and readmes are vendored. Upstream tests, examples and dev-dependencies are dropped, so the SBOM lists only what is built.</p>
+
+<h2 id="str0m">str0m 0.24.0 and str0m-rust-crypto 0.6.0</h2>
+<div class="table-wrap"><table>
+  <thead><tr><th>#</th><th>Change</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>The VP8 packetizer writes a 15-bit PictureID in every payload descriptor, from a random start, as browsers do</td><td>LiveKit's SFU does not forward VP8 without it</td></tr>
+    <tr><td>2</td><td><code>SdpApi::apply_offer()</code> returns an offer when nothing changed</td><td>JSEP <code>createOffer()</code> always returns one; LiveKit and perfect negotiation rely on it</td></tr>
+    <tr><td>3</td><td>The DTLS certificate (ECDSA P-256, random 128-bit serial, one year) is built with RustCrypto <code>p256</code> and <code>x509-cert</code></td><td>dimpl's <code>rcgen</code> feature enabled <code>aws-lc-rs</code>, compiling AWS-LC (C)</td></tr>
+    <tr><td>4</td><td>Dev-dependencies removed from the vendored manifests</td><td>The SBOM lists only built code</td></tr>
+    <tr><td>5</td><td><code>provider_with_dtls</code> builds the crypto provider with <code>DtlsOptions</code>: extra key exchange groups and a group preference list</td><td>Post-quantum DTLS 1.3; the default provider is unchanged</td></tr>
+    <tr><td>6</td><td><code>dimpl</code>, <code>is</code> and <code>str0m-proto</code> are path dependencies</td><td>The patched dimpl applies downstream without <code>[patch]</code></td></tr>
+  </tbody>
+</table></div>
+
+<h2 id="dimpl">dimpl 0.7.4</h2>
+<p>The patches add post-quantum groups to DTLS 1.3 and change nothing for classical groups. Every changed spot is marked in the source.</p>
+<div class="table-wrap"><table>
+  <thead><tr><th>#</th><th>Change</th><th>Files</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td>Named groups: <code>MLKEM512</code>, <code>MLKEM768</code>, <code>MLKEM1024</code>, <code>SECP256R1MLKEM768</code>, <code>X25519MLKEM768</code>, and <code>X25519MLKEM512_PRIVATE</code> (0xfe5c). The supported list grows from 4 to 10, and group lists use that capacity, so a peer offering many groups is no longer rejected.</td><td><code>src/types.rs</code></td></tr>
+    <tr><td>2</td><td><code>SupportedKxGroup::server_exchange</code> takes the client's share and returns the server's share and the secret. Its default runs the Diffie-Hellman steps.</td><td><code>src/crypto/provider.rs</code>, <code>src/dtls13/server.rs</code></td></tr>
+    <tr><td>3</td><td><code>SupportedKxGroup::dtls12()</code> keeps KEM groups out of DTLS 1.2 offers, selection and key exchange</td><td><code>src/dtls12/</code></td></tr>
+    <tr><td>4</td><td>The provider self-test exchanges keys as a TLS 1.3 client and server, covering both kinds of group</td><td><code>src/crypto/validation/mod.rs</code></td></tr>
+    <tr><td>5</td><td>A ClientHello with a hybrid share (about 1.4 kB) is split into MTU-sized records, per RFC 9147 section 5.5. The forked 1.2 or 1.3 handshake learns how many epoch-0 records it used.</td><td><code>src/auto.rs</code>, <code>src/dtls12/client.rs</code>, <code>src/dtls13/client.rs</code>, <code>src/dtls13/engine.rs</code></td></tr>
+    <tr><td>6</td><td>A ServerHello split over several records is DTLS 1.3, since a DTLS 1.2 ServerHello always fits one. The 1.3 client then reassembles it.</td><td><code>src/auto.rs</code></td></tr>
+  </tbody>
+</table></div>
+<p>The patched crate passes its own unit tests: 251 with <code>rust-crypto</code> and 301 with the default features, run from a copy with the upstream dev-dependencies restored.</p>
+
+<h2>Unmodified</h2>
+<p><code>is</code> and <code>str0m-proto</code> are vendored unchanged, apart from the path wiring above.</p>
