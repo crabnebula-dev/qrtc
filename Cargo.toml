@@ -41,16 +41,17 @@ zeroize = { version = "1", optional = true }
 moduletto = { git = "https://github.com/crabnebula-dev/moduletto", branch = "main", optional = true }
 
 [features]
-default = ["turn-tls-ring"]
+default = ["turn-tls-ring", "pq-moduletto"]
 # ring: mature, compiles C and assembly.
 turn-tls-ring = ["_turn-tls", "rustls/ring", "tokio-rustls/ring"]
 # Pure Rust (RustCrypto). Pre-release provider; keeps the build free of C.
 turn-tls-rustcrypto = ["_turn-tls", "dep:rustls-rustcrypto"]
 _turn-tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-native-certs", "dep:webpki-roots"]
 # Post-quantum key agreement for DTLS 1.3 and TURN over TLS: X25519MLKEM768
-# (what browsers and TLS servers negotiate) and MLKEM768. Enable per
-# connection with RtcConfiguration.postQuantum. Pick one ML-KEM backend,
-# both pure Rust:
+# (what browsers and TLS servers negotiate) and MLKEM768. Set per connection
+# with RtcConfiguration.postQuantum (default prefer when built in). Two ML-KEM
+# backends, both pure Rust; pq-moduletto is on by default. For RustCrypto
+# instead: default-features = false, features = ["pq-hybrid", ...].
 # RustCrypto ml-kem.
 pq-hybrid = ["_pq", "dep:ml-kem"]
 # moduletto (NEON on aarch64). Also adds ML-KEM-512 and an X25519+ML-KEM-512
