@@ -365,6 +365,7 @@ mod tests {
             sender_track_id: "t".into(),
             from_add_track: true,
             stopped: false,
+            codec_preferences: Vec::new(),
         })
         .unwrap();
         let mut offer = a.create_offer().unwrap();
@@ -448,6 +449,7 @@ mod media_tests {
             sender_track_id: track.into(),
             from_add_track,
             stopped: false,
+            codec_preferences: Vec::new(),
         }
     }
 

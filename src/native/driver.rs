@@ -417,8 +417,27 @@ impl Driver {
             cfg.codec_config()
                 .add_config(pt.into(), None, Codec::Tele, rate, Some(1), format);
         }
+        let mut cfg = cfg.enable_vp8(true);
+        // H.264 when the page can encode it (WebCodecs through GStreamer; the
+        // shim probes). Packetization mode 1 only; the page encodes constrained
+        // baseline, which every profile offered here can decode. PTs as
+        // libwebrtc/str0m number them.
+        let h264 = config
+            .video_codecs
+            .as_ref()
+            .is_some_and(|c| c.iter().any(|c| c.eq_ignore_ascii_case("h264")));
+        if h264 {
+            for (pt, rtx, profile) in [
+                (108u8, 109u8, 0x42e01f),
+                (127, 121, 0x42001f),
+                (123, 119, 0x4d001f),
+                (114, 115, 0x64001f),
+            ] {
+                cfg.codec_config()
+                    .add_h264(pt.into(), Some(rtx.into()), true, profile);
+            }
+        }
         let rtc = cfg
-            .enable_vp8(true)
             // TWCC bandwidth estimation drives the page's video encoder bitrate.
             .enable_bwe(Some(str0m::bwe::Bitrate::kbps(800)))
             .set_stats_interval(Some(Duration::from_secs(1)))
@@ -796,6 +815,7 @@ impl Driver {
             Some(jsep::Rewrite {
                 direction: dir,
                 msid,
+                codecs: t.spec.codec_preferences.clone(),
             })
         })
     }
@@ -1080,6 +1100,7 @@ impl Driver {
                                         sender_track_id: format!("{:016x}", rand::random::<u64>()),
                                         from_add_track: false,
                                         stopped: false,
+                                        codec_preferences: Vec::new(),
                                     });
                                     t.created_by_remote = true;
                                     t.mid = Some(mid.clone());
@@ -1963,6 +1984,7 @@ impl Driver {
                 };
                 let keyframe = match (&d.codec_extra, codec) {
                     (_, CodecName::Vp8) => d.data.first().map(|b| b & 1 == 0).unwrap_or(false),
+                    (str0m::format::CodecExtra::H264(e), CodecName::H264) => e.is_keyframe,
                     (_, CodecName::Opus) => true,
                     _ => false,
                 };

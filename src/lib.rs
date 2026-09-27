@@ -90,6 +90,21 @@ pub struct RtcConfiguration {
     /// `"balanced"`, `"max-compat"` or `"max-bundle"`.
     #[serde(default)]
     pub bundle_policy: Option<String>,
+    /// Not W3C: video codecs the page can encode and decode (`"vp8"`,
+    /// `"h264"`). The shim probes WebCodecs and fills this in. Absent means
+    /// VP8 only.
+    #[serde(default)]
+    pub video_codecs: Option<Vec<String>>,
+}
+
+/// One entry of `RTCRtpTransceiver.setCodecPreferences()` (an
+/// RTCRtpCodecCapability).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodecPreference {
+    pub mime_type: String,
+    #[serde(default)]
+    pub sdp_fmtp_line: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +239,9 @@ pub struct TransceiverSpec {
     pub from_add_track: bool,
     #[serde(default)]
     pub stopped: bool,
+    /// From setCodecPreferences(); empty means the default order.
+    #[serde(default)]
+    pub codec_preferences: Vec<CodecPreference>,
 }
 
 /// Negotiation facts the JS side needs to update transceivers and fire
