@@ -112,6 +112,8 @@ live in tauri-plugin-webrtc.
 
 Minimum Rust: 1.91.
 
+`sbom/qrtc.cdx.json` is the CycloneDX 1.5 SBOM of the default build (`cargo cyclonedx`).
+
 ## Licence and compliance
 
 Licensed under either of Apache License 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
