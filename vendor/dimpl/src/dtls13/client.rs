@@ -181,7 +181,7 @@ impl Client {
 
         // Inject transcript + sequence state from the hybrid CH that was
         // already sent on the wire by ClientPending.
-        engine.inject_hybrid_client_hello(&hybrid.transcript_bytes);
+        engine.inject_hybrid_client_hello(&hybrid.transcript_bytes, hybrid.records);
 
         let mut client = Client {
             state: State::AwaitServerHello,
@@ -1236,7 +1236,7 @@ fn handshake_create_client_hello(
 
     // 2. supported_groups extension
     let sg_start = ext_buf.len();
-    let groups: ArrayVec<NamedGroup, 4> = engine.config().kx_groups().map(|g| g.name()).collect();
+    let groups: ArrayVec<NamedGroup, { NamedGroup::supported().len() }> = engine.config().kx_groups().map(|g| g.name()).collect();
     let sg = SupportedGroupsExtension { groups };
     sg.serialize(&mut ext_buf);
     let sg_end = ext_buf.len();

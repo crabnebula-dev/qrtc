@@ -59,7 +59,8 @@ impl ClientHello {
         if has_ecdh {
             // Add supported groups extension from config
             let mut groups = super::NamedGroupVec::new();
-            for kx_group in config.kx_groups() {
+            // Patched (tauri-plugin-webrtc): KEM groups are DTLS 1.3 only.
+            for kx_group in config.kx_groups().filter(|g| g.dtls12()) {
                 groups.push(kx_group.name());
             }
             let supported_groups = SupportedGroupsExtension { groups };

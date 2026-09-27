@@ -66,6 +66,9 @@ pub(crate) struct HybridClientHello {
     ///     Used by [`wire_packet`](Self::wire_packet) to build the on-wire record
     ///     and by `Client12::new_from_hybrid` for transcript injection.
     pub handshake_fragment: Buf,
+
+    /// Patched (tauri-plugin-webrtc): records used to send the CH.
+    pub records: u64,
 }
 
 impl HybridClientHello {
@@ -138,7 +141,7 @@ impl HybridClientHello {
 
         // 2. supported_groups (filtered by config)
         let start = ext_buf.len();
-        let groups: ArrayVec<NamedGroup, 4> = config.kx_groups().map(|g| g.name()).collect();
+        let groups: ArrayVec<NamedGroup, { NamedGroup::supported().len() }> = config.kx_groups().map(|g| g.name()).collect();
         let sg = SupportedGroupsExtension { groups };
         sg.serialize(&mut ext_buf);
         ext_entries.push((EXT_SUPPORTED_GROUPS, start, ext_buf.len()));
@@ -236,20 +239,48 @@ impl HybridClientHello {
             active_key_exchange: key_exchange,
             transcript_bytes,
             handshake_fragment,
+            records: 1,
         })
     }
 
-    /// Build the full wire-format DTLSPlaintext record for the hybrid CH.
-    pub fn wire_packet(&self) -> Buf {
-        let mut pkt = Buf::new();
-        // DTLSPlaintext header: content_type(1) + version(2) + epoch(2) + seq(6) + length(2)
-        pkt.push(0x16); // Handshake
-        pkt.extend_from_slice(&0xFEFDu16.to_be_bytes()); // DTLS 1.2
-        pkt.extend_from_slice(&0u16.to_be_bytes()); // epoch 0
-        pkt.extend_from_slice(&[0u8; 6]); // sequence 0
-        pkt.extend_from_slice(&(self.handshake_fragment.len() as u16).to_be_bytes());
-        pkt.extend_from_slice(&self.handshake_fragment);
-        pkt
+    /// Build the wire-format DTLSPlaintext records for the hybrid CH.
+    ///
+    /// Patched (tauri-plugin-webrtc): a ClientHello carrying a post-quantum
+    /// key share (over 1 kB) does not fit one datagram, so the handshake
+    /// message is split into fragments of at most `mtu` bytes per record
+    /// (RFC 9147 section 5.5). Each record uses the next epoch-0 sequence
+    /// number; `records` tells the forked handshake how many were used.
+    pub fn wire_packets(&self, mtu: usize) -> Vec<Buf> {
+        const RECORD_HEADER: usize = 13;
+        const HANDSHAKE_HEADER: usize = 12;
+        let body = &self.handshake_fragment[HANDSHAKE_HEADER..];
+        let max = mtu
+            .saturating_sub(RECORD_HEADER + HANDSHAKE_HEADER)
+            .max(64);
+        let total = (body.len() as u32).to_be_bytes();
+        let mut out = Vec::new();
+        let mut offset = 0usize;
+        loop {
+            let len = (body.len() - offset).min(max);
+            let mut pkt = Buf::new();
+            // DTLSPlaintext header: content_type(1) + version(2) + epoch(2) + seq(6) + length(2)
+            pkt.push(0x16); // Handshake
+            pkt.extend_from_slice(&0xFEFDu16.to_be_bytes()); // DTLS 1.2
+            pkt.extend_from_slice(&0u16.to_be_bytes()); // epoch 0
+            pkt.extend_from_slice(&(out.len() as u64).to_be_bytes()[2..]); // sequence
+            pkt.extend_from_slice(&((HANDSHAKE_HEADER + len) as u16).to_be_bytes());
+            pkt.push(0x01); // msg_type = ClientHello
+            pkt.extend_from_slice(&total[1..]); // length
+            pkt.extend_from_slice(&0u16.to_be_bytes()); // message_seq = 0
+            pkt.extend_from_slice(&(offset as u32).to_be_bytes()[1..]); // fragment_offset
+            pkt.extend_from_slice(&(len as u32).to_be_bytes()[1..]); // fragment_length
+            pkt.extend_from_slice(&body[offset..offset + len]);
+            out.push(pkt);
+            offset += len;
+            if offset >= body.len() {
+                return out;
+            }
+        }
     }
 }
 
@@ -259,10 +290,12 @@ pub(crate) struct ClientPending {
     hybrid: HybridClientHello,
     config: Arc<Config>,
     certificate: DtlsCertificate,
-    /// Pre-built wire packet (record header + handshake fragment).
-    wire_packet: Buf,
-    /// Whether the wire_packet hasn't been polled yet.
+    /// Pre-built wire records (record header + handshake fragment).
+    wire_packets: Vec<Buf>,
+    /// Whether the wire_packets haven't been polled yet.
     needs_send: bool,
+    /// Next record of `wire_packets` to emit.
+    next_packet: usize,
     /// Last time handle_timeout was called.
     last_now: Instant,
     /// When to retransmit the wire_packet.
@@ -277,14 +310,16 @@ impl ClientPending {
         certificate: DtlsCertificate,
         now: Instant,
     ) -> Result<Self, Error> {
-        let hybrid = HybridClientHello::new(&config)?;
-        let wire_packet = hybrid.wire_packet();
+        let mut hybrid = HybridClientHello::new(&config)?;
+        let wire_packets = hybrid.wire_packets(config.mtu());
+        hybrid.records = wire_packets.len() as u64;
         Ok(ClientPending {
             hybrid,
             config,
             certificate,
-            wire_packet,
+            wire_packets,
             needs_send: true,
+            next_packet: 0,
             last_now: now,
             retransmit_at: None,
             retransmit_count: 0,
@@ -316,13 +351,18 @@ impl ClientPending {
 
     pub fn poll_output<'a>(&mut self, buf: &'a mut [u8]) -> Output<'a> {
         if self.needs_send {
-            let len = self.wire_packet.len();
+            let pkt = &self.wire_packets[self.next_packet];
+            let len = pkt.len();
             if buf.len() < len {
                 // Keep needs_send armed so the packet is emitted on retry.
                 return Output::BufferTooSmall { needed: len };
             }
-            self.needs_send = false;
-            buf[..len].copy_from_slice(&self.wire_packet);
+            buf[..len].copy_from_slice(pkt);
+            self.next_packet += 1;
+            if self.next_packet == self.wire_packets.len() {
+                self.needs_send = false;
+                self.next_packet = 0;
+            }
             return Output::Packet(&buf[..len]);
         }
         let next = self
@@ -393,6 +433,21 @@ fn server_hello_version_inner(packet: &[u8]) -> Option<DetectedVersion> {
     let fragment_len = ((record_body[9] as usize) << 16)
         | ((record_body[10] as usize) << 8)
         | (record_body[11] as usize);
+
+    // Patched (tauri-plugin-webrtc): a ServerHello split over several
+    // records is DTLS 1.3 with a large (post-quantum) key share. A DTLS 1.2
+    // ServerHello is around 100 bytes and always fits one record. The
+    // DTLS 1.3 client reassembles the fragments.
+    let msg_len = ((record_body[1] as usize) << 16)
+        | ((record_body[2] as usize) << 8)
+        | (record_body[3] as usize);
+    let fragment_offset = ((record_body[6] as usize) << 16)
+        | ((record_body[7] as usize) << 8)
+        | (record_body[8] as usize);
+    if fragment_offset != 0 || fragment_len < msg_len {
+        return Some(DetectedVersion::Dtls13);
+    }
+
     let body = record_body.get(12..12 + fragment_len)?;
 
     // ServerHello body:

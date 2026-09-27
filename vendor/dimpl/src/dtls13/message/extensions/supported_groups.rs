@@ -9,7 +9,7 @@ use nom::error::{Error, ErrorKind};
 /// SupportedGroups extension as defined in RFC 8422
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SupportedGroupsExtension {
-    pub groups: ArrayVec<NamedGroup, 4>,
+    pub groups: ArrayVec<NamedGroup, { NamedGroup::supported().len() }>,
 }
 
 impl SupportedGroupsExtension {
@@ -24,7 +24,7 @@ impl SupportedGroupsExtension {
             return Err(Err::Failure(Error::new(input, ErrorKind::LengthValue)));
         }
 
-        let mut groups: ArrayVec<NamedGroup, 4> = ArrayVec::new();
+        let mut groups: ArrayVec<NamedGroup, { NamedGroup::supported().len() }> = ArrayVec::new();
 
         // Parse groups; only include supported groups (skip Unknown and unsupported)
         while !current_input.is_empty() {

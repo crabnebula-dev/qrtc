@@ -29,7 +29,12 @@ pub fn default_provider() -> CryptoProvider {
     static SRTP: RustCryptoSrtpProvider = RustCryptoSrtpProvider;
     static SHA1_HMAC: RustCryptoSha1HmacProvider = RustCryptoSha1HmacProvider;
     static SHA256: RustCryptoSha256Provider = RustCryptoSha256Provider;
-    static DTLS: RustCryptoDtlsProvider = RustCryptoDtlsProvider;
+    static DTLS: RustCryptoDtlsProvider = RustCryptoDtlsProvider {
+        options: DtlsOptions {
+            provider: None,
+            kx_groups: None,
+        },
+    };
 
     CryptoProvider {
         srtp_provider: &SRTP,
@@ -37,4 +42,24 @@ pub fn default_provider() -> CryptoProvider {
         sha256_provider: &SHA256,
         dtls_provider: &DTLS,
     }
+}
+
+/// Patched (tauri-plugin-webrtc): DTLS options for [`provider_with_dtls`].
+#[derive(Debug, Clone, Default)]
+pub struct DtlsOptions {
+    /// dimpl crypto provider to use instead of dimpl's RustCrypto default,
+    /// for example one with additional key exchange groups.
+    pub provider: Option<dimpl::crypto::CryptoProvider>,
+    /// Key exchange groups to offer and accept, in preference order.
+    pub kx_groups: Option<Vec<dimpl::NamedGroup>>,
+}
+
+/// Patched (tauri-plugin-webrtc): the RustCrypto provider with DTLS options.
+///
+/// The DTLS provider is leaked to get the `'static` lifetime str0m expects,
+/// so call this once per distinct configuration and reuse the result.
+pub fn provider_with_dtls(options: DtlsOptions) -> CryptoProvider {
+    let mut p = default_provider();
+    p.dtls_provider = Box::leak(Box::new(RustCryptoDtlsProvider { options }));
+    p
 }

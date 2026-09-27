@@ -730,6 +730,7 @@ impl Dtls {
                 let mut client12 = Client12::new_from_hybrid(
                     hybrid.random,
                     &hybrid.handshake_fragment,
+                    hybrid.records,
                     config,
                     certificate,
                     now,

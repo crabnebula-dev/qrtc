@@ -22,3 +22,9 @@ tests and docs are dropped and their targets removed from the manifest).
 
 4. Dev-dependencies are removed from both vendored manifests (their tests are
    not vendored), so SBOMs list only what is built.
+
+5. `str0m-rust-crypto` (`src/lib.rs`, `src/dtls.rs`): `provider_with_dtls`
+   builds the RustCrypto crypto provider with `DtlsOptions`: a dimpl crypto
+   provider (for extra key exchange groups) and a key exchange group
+   preference list. The engine uses it for post-quantum DTLS 1.3; see
+   `vendor/dimpl/PATCHES.md`. The default provider is unchanged.

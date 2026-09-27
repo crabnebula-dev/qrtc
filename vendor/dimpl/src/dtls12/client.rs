@@ -124,6 +124,7 @@ impl Client {
     pub(crate) fn new_from_hybrid(
         random: Random,
         handshake_fragment: &[u8],
+        records: u64,
         config: std::sync::Arc<Config>,
         certificate: DtlsCertificate,
         now: Instant,
@@ -154,8 +155,11 @@ impl Client {
         // Inject the hybrid CH into the transcript so it matches the server's
         // transcript when the server skips HelloVerifyRequest.
         engine.transcript.extend_from_slice(handshake_fragment);
-        // Advance epoch-0 record sequence past the hybrid CH record.
-        engine.advance_epoch_0_sequence();
+        // Advance epoch-0 record sequence past the hybrid CH record(s).
+        // Patched (tauri-plugin-webrtc): the CH may span several records.
+        for _ in 0..records {
+            engine.advance_epoch_0_sequence();
+        }
 
         let mut client = Client {
             state: State::AwaitHelloVerifyRequest,

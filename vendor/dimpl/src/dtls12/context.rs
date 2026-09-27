@@ -182,6 +182,7 @@ impl CryptoContext {
         let kx_group = self
             .provider()
             .supported_kx_groups()
+            .filter(|g| g.dtls12()) // Patched (tauri-plugin-webrtc): DTLS 1.3 only groups
             .find(|g| g.name() == named_group)
             .ok_or(CryptoError::UnsupportedEcdheNamedGroup(named_group))?;
 
@@ -201,6 +202,7 @@ impl CryptoContext {
         let kx_group = self
             .provider()
             .supported_kx_groups()
+            .filter(|g| g.dtls12()) // Patched (tauri-plugin-webrtc): DTLS 1.3 only groups
             .find(|g| g.name() == group)
             .ok_or(CryptoError::UnsupportedEcdheNamedGroup(group))?;
 

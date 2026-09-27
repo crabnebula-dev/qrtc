@@ -40,7 +40,16 @@ impl CryptoProvider {
         self.kx_groups.iter().copied().filter(|kx| {
             matches!(
                 kx.name(),
-                NamedGroup::X25519 | NamedGroup::Secp256r1 | NamedGroup::Secp384r1
+                NamedGroup::X25519
+                    | NamedGroup::Secp256r1
+                    | NamedGroup::Secp384r1
+                    // Patched (tauri-plugin-webrtc): post-quantum KEM groups.
+                    | NamedGroup::X25519MLKEM768
+                    | NamedGroup::SECP256R1MLKEM768
+                    | NamedGroup::MLKEM512
+                    | NamedGroup::MLKEM768
+                    | NamedGroup::MLKEM1024
+                    | NamedGroup::X25519MLKEM512_PRIVATE
             )
         })
     }
@@ -370,26 +379,21 @@ impl CryptoProvider {
                     source: e,
                 })
             })?;
-            let bob = kx.start_exchange(Buf::new()).map_err(|e| {
-                provider_error(CryptoProviderValidationError::KeyExchangeStartFailed {
-                    group,
-                    source: e,
-                })
-            })?;
-
+            // Patched (tauri-plugin-webrtc): bob answers as a TLS 1.3 server,
+            // which covers both Diffie-Hellman and KEM groups.
             let alice_pub = alice.pub_key().to_vec();
-            let bob_pub = bob.pub_key().to_vec();
+            let mut bob_pub = Buf::new();
+            let mut bob_secret = Buf::new();
+            kx.server_exchange(Buf::new(), &alice_pub, &mut bob_pub, &mut bob_secret)
+                .map_err(|e| {
+                    provider_error(CryptoProviderValidationError::KeyExchangeCompleteFailed {
+                        group,
+                        source: e,
+                    })
+                })?;
 
             let mut alice_secret = Buf::new();
             alice.complete(&bob_pub, &mut alice_secret).map_err(|e| {
-                provider_error(CryptoProviderValidationError::KeyExchangeCompleteFailed {
-                    group,
-                    source: e,
-                })
-            })?;
-
-            let mut bob_secret = Buf::new();
-            bob.complete(&alice_pub, &mut bob_secret).map_err(|e| {
                 provider_error(CryptoProviderValidationError::KeyExchangeCompleteFailed {
                     group,
                     source: e,

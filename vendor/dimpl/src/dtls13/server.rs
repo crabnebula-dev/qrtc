@@ -458,7 +458,7 @@ impl State {
         let mut client_key_shares: Option<
             ArrayVec<(NamedGroup, std::ops::Range<usize>), { NamedGroup::supported().len() }>,
         > = None;
-        let mut client_supported_groups: Option<ArrayVec<NamedGroup, 4>> = None;
+        let mut client_supported_groups: Option<ArrayVec<NamedGroup, { NamedGroup::supported().len() }>> = None;
         let mut client_srtp_profiles: Option<ArrayVec<crate::dtls13::message::SrtpProfileId, 3>> =
             None;
         let mut client_cookie_data: Option<ArrayVec<u8, 32>> = None;
@@ -548,7 +548,7 @@ impl State {
 
         // Pre-compute whether we also need a key_share group selection, so
         // we can piggyback it on a cookie HRR (avoiding two sequential HRRs).
-        let our_groups: ArrayVec<NamedGroup, 4> = server
+        let our_groups: ArrayVec<NamedGroup, { NamedGroup::supported().len() }> = server
             .engine
             .config()
             .kx_groups()
@@ -711,24 +711,22 @@ impl State {
                 crate::CryptoError::KeyExchangeGroupNotFound(selected_group),
             ))?;
 
+        // Patched (tauri-plugin-webrtc): one call covers both ECDHE and KEM
+        // groups. For a KEM the server share is the ciphertext, which depends
+        // on the client's share.
         let kx_buf = server.engine.pop_buffer();
-        let key_exchange = kx_group
-            .start_exchange(kx_buf)
-            .map_err(Error::CryptoError)?;
-
-        // Store server's public key in extension_data
-        server.extension_data.clear();
-        let pub_key = key_exchange.pub_key();
-        let pub_key_start = server.extension_data.len();
-        server.extension_data.extend_from_slice(pub_key);
-        let pub_key_end = server.extension_data.len();
-
-        // Complete ECDHE with client's public key
+        let mut server_share = server.engine.pop_buffer();
         let peer_pub_key = &server.defragment_buffer[peer_key_range];
         let mut shared_secret = server.engine.pop_buffer();
-        key_exchange
-            .complete(peer_pub_key, &mut shared_secret)
+        kx_group
+            .server_exchange(kx_buf, peer_pub_key, &mut server_share, &mut shared_secret)
             .map_err(Error::CryptoError)?;
+
+        // Store server's key share in extension_data
+        server.extension_data.clear();
+        let pub_key_start = server.extension_data.len();
+        server.extension_data.extend_from_slice(&server_share);
+        let pub_key_end = server.extension_data.len();
 
         server.shared_secret = Some(shared_secret);
 

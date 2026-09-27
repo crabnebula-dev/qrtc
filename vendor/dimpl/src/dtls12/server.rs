@@ -573,6 +573,8 @@ impl State {
             .engine
             .config()
             .kx_groups()
+            // Patched (tauri-plugin-webrtc): KEM groups are DTLS 1.3 only.
+            .filter(|g| g.dtls12())
             .map(|g| g.name())
             .collect();
         let selected_named_group = select_named_group(

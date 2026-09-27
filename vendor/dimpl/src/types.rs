@@ -142,6 +142,23 @@ impl NamedGroup {
     /// X448 (Curve448 for ECDHE).
     pub const X448: Self = Self(30);
 
+    // Patched (tauri-plugin-webrtc): post-quantum groups. These are key
+    // encapsulation mechanisms (see `SupportedKxGroup::server_exchange`) and
+    // are only used with DTLS 1.3.
+    /// ML-KEM-512 (draft-ietf-tls-mlkem).
+    pub const MLKEM512: Self = Self(0x0200);
+    /// ML-KEM-768 (draft-ietf-tls-mlkem).
+    pub const MLKEM768: Self = Self(0x0201);
+    /// ML-KEM-1024 (draft-ietf-tls-mlkem).
+    pub const MLKEM1024: Self = Self(0x0202);
+    /// SecP256r1MLKEM768 hybrid (draft-ietf-tls-ecdhe-mlkem).
+    pub const SECP256R1MLKEM768: Self = Self(0x11eb);
+    /// X25519MLKEM768 hybrid (draft-ietf-tls-ecdhe-mlkem).
+    pub const X25519MLKEM768: Self = Self(0x11ec);
+    /// X25519 + ML-KEM-512 hybrid on a private-use codepoint (RFC 8446
+    /// section 4.2.7). Only meaningful between endpoints that agree on it.
+    pub const X25519MLKEM512_PRIVATE: Self = Self(0xfe5c);
+
     /// Convert a wire format u16 value to a `NamedGroup`.
     pub const fn from_u16(value: u16) -> Self {
         Self(value)
@@ -154,7 +171,7 @@ impl NamedGroup {
 
     /// Returns true if this is not a known TLS named group wire value.
     pub const fn is_unknown(&self) -> bool {
-        !matches!(*self, Self(1..=25 | 29..=30))
+        !matches!(*self, Self(1..=25 | 29..=30 | 0x0200..=0x0202 | 0x11eb..=0x11ec | 0xfe5c))
     }
 
     /// Parse a `NamedGroup` from wire format.
@@ -202,12 +219,18 @@ impl NamedGroup {
     }
 
     /// Supported named groups in preference order.
-    pub const fn supported() -> &'static [NamedGroup; 4] {
+    pub const fn supported() -> &'static [NamedGroup; 10] {
         &[
             NamedGroup::X25519,
             NamedGroup::Secp256r1,
             NamedGroup::Secp384r1,
             NamedGroup::Secp521r1,
+            NamedGroup::X25519MLKEM768,
+            NamedGroup::SECP256R1MLKEM768,
+            NamedGroup::MLKEM512,
+            NamedGroup::MLKEM768,
+            NamedGroup::MLKEM1024,
+            NamedGroup::X25519MLKEM512_PRIVATE,
         ]
     }
 }
@@ -242,6 +265,12 @@ impl fmt::Debug for NamedGroup {
             NamedGroup::Secp521r1 => f.write_str("Secp521r1"),
             NamedGroup::X25519 => f.write_str("X25519"),
             NamedGroup::X448 => f.write_str("X448"),
+            NamedGroup::MLKEM512 => f.write_str("MLKEM512"),
+            NamedGroup::MLKEM768 => f.write_str("MLKEM768"),
+            NamedGroup::MLKEM1024 => f.write_str("MLKEM1024"),
+            NamedGroup::SECP256R1MLKEM768 => f.write_str("SecP256r1MLKEM768"),
+            NamedGroup::X25519MLKEM768 => f.write_str("X25519MLKEM768"),
+            NamedGroup::X25519MLKEM512_PRIVATE => f.write_str("X25519MLKEM512(private)"),
             _ => f.debug_tuple("Unknown").field(&self.0).finish(),
         }
     }

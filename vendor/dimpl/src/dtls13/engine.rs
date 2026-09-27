@@ -285,14 +285,14 @@ impl Engine {
     /// and bumps the epoch-0 record sequence so subsequent records don't
     /// collide.  Does **not** enqueue the record for output — the hybrid
     /// CH was already transmitted.
-    pub fn inject_hybrid_client_hello(&mut self, transcript_bytes: &[u8]) {
+    pub fn inject_hybrid_client_hello(&mut self, transcript_bytes: &[u8], records: u64) {
         self.transcript.extend_from_slice(transcript_bytes);
         self.next_handshake_seq_no = 1;
-        // Advance past the record sequence used by the hybrid CH.
+        // Advance past the record sequence(s) used by the hybrid CH.
+        // Patched (tauri-plugin-webrtc): the CH may span several records.
         // Defense-in-depth: guard against epoch-0 sequence overflow.
-        if self.sequence_epoch_0.sequence_number < MAX_SEQUENCE_NUMBER {
-            self.sequence_epoch_0.sequence_number += 1;
-        }
+        let n = self.sequence_epoch_0.sequence_number.saturating_add(records);
+        self.sequence_epoch_0.sequence_number = n.min(MAX_SEQUENCE_NUMBER);
     }
 
     pub fn config(&self) -> &Config {

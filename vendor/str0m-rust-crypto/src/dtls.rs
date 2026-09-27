@@ -12,8 +12,12 @@ use str0m_proto::crypto::dtls::{DtlsCert, DtlsImplError, DtlsInstance, DtlsOutpu
 // DTLS Provider Implementation
 // ============================================================================
 
-#[derive(Debug)]
-pub(super) struct RustCryptoDtlsProvider;
+/// Patched (tauri-plugin-webrtc): optional dimpl crypto provider and key
+/// exchange group preference, for post-quantum groups.
+#[derive(Debug, Default)]
+pub(super) struct RustCryptoDtlsProvider {
+    pub(super) options: crate::DtlsOptions,
+}
 
 impl DtlsProvider for RustCryptoDtlsProvider {
     fn generate_certificate(&self) -> Option<DtlsCert> {
@@ -36,6 +40,12 @@ impl DtlsProvider for RustCryptoDtlsProvider {
         // Create a default dimpl Config with RustCrypto crypto provider
         // ICE verifies return routability before DTLS, making server cookies redundant.
         let mut builder = dimpl::Config::builder().use_server_cookie(false);
+        if let Some(p) = &self.options.provider {
+            builder = builder.with_crypto_provider(p.clone());
+        }
+        if let Some(groups) = &self.options.kx_groups {
+            builder = builder.kx_groups(groups);
+        }
         if let Some(mtu) = mtu {
             builder = builder.mtu(mtu);
         }

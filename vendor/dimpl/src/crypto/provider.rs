@@ -288,6 +288,35 @@ pub trait SupportedKxGroup: CryptoSafe {
     /// Start a new key exchange, generating ephemeral keypair.
     /// The provided `buf` will be used to store the public key.
     fn start_exchange(&self, buf: Buf) -> Result<Box<dyn ActiveKeyExchange>, CryptoError>;
+
+    // Patched (tauri-plugin-webrtc): key encapsulation support.
+
+    /// Server side of a TLS 1.3 key exchange: given the client's key share,
+    /// write the server's key share to `server_share` and the shared secret
+    /// to `shared_secret`.
+    ///
+    /// The default runs Diffie-Hellman: generate an ephemeral key pair and
+    /// combine it with the peer's public key. A KEM overrides this to
+    /// encapsulate to the client's encapsulation key, returning the
+    /// ciphertext as the server share.
+    fn server_exchange(
+        &self,
+        buf: Buf,
+        peer_pub: &[u8],
+        server_share: &mut Buf,
+        shared_secret: &mut Buf,
+    ) -> Result<(), CryptoError> {
+        let kx = self.start_exchange(buf)?;
+        server_share.clear();
+        server_share.extend_from_slice(kx.pub_key());
+        kx.complete(peer_pub, shared_secret)
+    }
+
+    /// Whether this group can be used in a DTLS 1.2 ECDHE handshake. KEM
+    /// groups cannot: DTLS 1.2 sends the server's share before the client's.
+    fn dtls12(&self) -> bool {
+        true
+    }
 }
 
 /// Signature verification against certificates.
