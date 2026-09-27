@@ -59,6 +59,7 @@ optional = true
 package = "sha1"
 
 [dependencies.str0m-proto]
+path = "../str0m-proto"
 version = "0.7.0"
 default-features = false
 

@@ -1,6 +1,7 @@
-//! Engine abstraction for `tauri-plugin-webrtc`.
+//! qrtc: a pure Rust WebRTC engine with hybrid post-quantum key agreement.
 //!
-//! The plugin core talks only to [`PeerEngine`] and [`Peer`]. The shipped
+//! Consumers (the Tauri plugin `tauri-plugin-webrtc`, and browser engines
+//! such as formal-web) talk only to [`PeerEngine`] and [`Peer`]. The shipped
 //! implementation is [`native::NativeEngine`]: pure Rust, built on the sans-I/O
 //! str0m stack, with our own JSEP layer, candidate gathering and STUN/TURN.
 //!

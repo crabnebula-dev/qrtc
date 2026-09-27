@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        features:
+          # Default: TURN over TLS with ring, post-quantum with moduletto.
+          - ""
+          # Pure Rust throughout, RustCrypto ML-KEM.
+          - "--no-default-features --features turn-tls-rustcrypto,pq-hybrid"
+          # Classical only.
+          - "--no-default-features"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Tests (JSEP, media, TURN, DTMF, post-quantum DTLS between engines)
+        run: cargo test --lib ${{ matrix.features }}

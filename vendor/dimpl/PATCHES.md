@@ -1,8 +1,8 @@
 # Local patches to dimpl 0.7.4
 
 Source: crates.io `dimpl-0.7.4` (src, manifest, licences and readme only; the
-integration tests and dev-dependencies are dropped). The workspace uses this
-copy through `[patch.crates-io]` in the root `Cargo.toml`.
+integration tests and dev-dependencies are dropped). qrtc, str0m,
+str0m-rust-crypto and str0m-proto all depend on this copy by path.
 
 The patches add post-quantum key exchange groups to DTLS 1.3. They are
 needed by the engine's `pq-hybrid` and `pq-moduletto` features and change

@@ -8,8 +8,8 @@
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
-use tauri_webrtc_engine::native::NativeEngine;
-use tauri_webrtc_engine::*;
+use qrtc::native::NativeEngine;
+use qrtc::*;
 
 fn out(v: Value) {
     let mut o = std::io::stdout().lock();

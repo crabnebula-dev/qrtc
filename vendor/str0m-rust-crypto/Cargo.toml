@@ -40,6 +40,7 @@ version = "0.10"
 version = "0.9"
 
 [dependencies.dimpl]
+path = "../dimpl"
 version = "0.7.1"
 features = ["rust-crypto"]
 default-features = false
@@ -68,6 +69,7 @@ version = "0.10"
 features = ["oid"]
 
 [dependencies.str0m-proto]
+path = "../str0m-proto"
 version = "0.7.0"
 features = ["dtls"]
 default-features = false

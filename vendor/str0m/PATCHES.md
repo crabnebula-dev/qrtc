@@ -28,3 +28,8 @@ tests and docs are dropped and their targets removed from the manifest).
    provider (for extra key exchange groups) and a key exchange group
    preference list. The engine uses it for post-quantum DTLS 1.3; see
    `vendor/dimpl/PATCHES.md`. The default provider is unchanged.
+
+6. `Cargo.toml`: `dimpl`, `is` and `str0m-proto` are path dependencies on the
+   copies in `vendor/`, so the patched dimpl applies without a `[patch]`
+   section in projects that depend on qrtc. `is` and `str0m-proto` are
+   vendored unmodified apart from the same path wiring.
