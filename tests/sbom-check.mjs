@@ -7,8 +7,12 @@
 //
 // Run on x86_64 Linux: the SBOM describes the default build for the host
 // target, and target-specific dependencies differ between platforms.
+//
+// cargo-cyclonedx names path dependencies (qrtc itself and vendor/) by the
+// absolute path of the checkout. Those bom-refs are rewritten to start at
+// /qrtc, so the SBOM does not depend on, or reveal, where it was generated.
 import { execFileSync } from 'node:child_process';
-import { readFileSync, renameSync, rmSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
@@ -17,9 +21,14 @@ const committed = path.join(root, 'sbom/qrtc.cdx.json');
 const generated = path.join(root, 'qrtc.cdx.json');
 
 execFileSync('cargo', ['cyclonedx', '--format', 'json', '--spec-version', '1.5'], { cwd: root, stdio: 'inherit' });
+const checkout = `path+file://${root}`;
+// Cargo writes #qrtc@0.1.0 instead of #0.1.0 when the checkout directory is
+// not named qrtc.
+writeFileSync(generated, readFileSync(generated, 'utf8').split(`${checkout}#qrtc@`).join(`${checkout}#`).split(checkout).join('path+file:///qrtc'));
 
 if (process.argv.includes('--update')) {
-  renameSync(generated, committed);
+  writeFileSync(committed, readFileSync(generated, 'utf8'));
+  rmSync(generated);
   console.log('sbom/qrtc.cdx.json updated');
   process.exit(0);
 }

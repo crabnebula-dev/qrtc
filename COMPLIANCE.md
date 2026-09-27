@@ -39,7 +39,7 @@ Article 64(10)(b) excludes administrative fines against open-source software ste
 - Releases are built from signed tags. Each carries the source archive, the SBOM and SHA-256 sums, with build provenance attestations (`.github/workflows/release.yml`).
 - Browser, SFU, Matrix and TURN server interoperability is tested in tauri-plugin-webrtc before each release of the plugin.
 - Patches to vendored crates are listed in each crate's `PATCHES.md` and are proposed upstream.
-- The engine uses no `unsafe` code of its own and no `-sys` crates. Dependencies are kept minimal. Known-vulnerable dependencies are removed or updated when advisories are published.
+- The engine uses no `unsafe` code of its own. With `turn-tls-rustcrypto` it compiles no C code; its only `-sys` crates bind platform APIs (the Windows and Apple certificate stores). Dependencies are kept minimal. Known-vulnerable dependencies are removed or updated when advisories are published.
 
 **Vulnerability handling.**
 

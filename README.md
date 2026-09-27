@@ -26,8 +26,9 @@ as the W3C `RTCPeerConnection` API. Two consumers are planned or shipping:
 | Encoded transforms | Hooks for `RTCRtpScriptTransform` (LiveKit E2EE) |
 | Stats | Candidate pairs, `inbound-rtp`, `outbound-rtp`, transport `tlsGroup` |
 
-The dependency tree has no `-sys` crates and, with
-`turn-tls-rustcrypto`, no C code.
+With `turn-tls-rustcrypto` the build compiles no C code. Its only `-sys`
+crates bind the platform's own APIs for the certificate store (Windows,
+Apple's Security framework).
 
 ## Post-quantum key agreement
 

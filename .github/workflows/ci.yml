@@ -38,9 +38,11 @@ jobs:
             features: "--no-default-features"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      # Lints run on a pinned toolchain, so a new stable release's lints do
+      # not fail CI unannounced; raise it deliberately.
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
-          toolchain: stable
+          toolchain: "1.95"
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: cargo fmt --check
@@ -115,7 +117,10 @@ jobs:
       - run: cargo check --all-targets ${{ matrix.features }}
 
   pure-rust:
-    # The README promises no C in the turn-tls-rustcrypto builds.
+    # The README promises no C in the turn-tls-rustcrypto builds: no crate
+    # that compiles C or C++ (cc, cmake, bindgen, pkg-config, vcpkg), and no
+    # ring, aws-lc or openssl-sys. Bindings to the platform's own APIs
+    # (windows-sys, core-foundation-sys, security-framework-sys) compile no C.
     name: no C code in pure Rust builds
     runs-on: ubuntu-latest
     steps:
@@ -123,14 +128,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: stable
-      - name: No -sys crates, cc, cmake, bindgen, ring or aws-lc
+      - name: No cc, cmake, bindgen, pkg-config, vcpkg, ring, aws-lc or openssl
         run: |
           status=0
           for pq in pq-hybrid pq-moduletto; do
             found=$(cargo tree -e normal,build --prefix none --target all \
                       --no-default-features --features "turn-tls-rustcrypto,$pq" \
                     | sed 's/ (\*)//' | sort -u \
-                    | grep -E -- '-sys v|^(cc|cmake|bindgen|ring|aws-lc-rs|aws-lc-sys) v' || true)
+                    | grep -E -- '^(cc|cmake|bindgen|pkg-config|vcpkg|ring|aws-lc-rs|aws-lc-sys|openssl-sys) v' || true)
             if [ -n "$found" ]; then
               echo "::error::turn-tls-rustcrypto,$pq pulls in native code:"; echo "$found"; status=1
             else
