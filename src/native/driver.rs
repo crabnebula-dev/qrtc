@@ -6,6 +6,7 @@ use super::jsep;
 use super::net::{bind_host_sockets, HostSocket};
 use super::stun::{self, Message, TransId};
 use super::turn::{TurnClient, TurnEvent};
+use super::turn_stream::{self, StreamEvent, TurnTransport};
 use super::{ChannelShared, Cmd, Shared};
 use crate::*;
 use std::collections::BTreeMap;
@@ -29,6 +30,7 @@ pub(crate) enum IceServerAddr {
         addr: SocketAddr,
         username: String,
         password: String,
+        transport: TurnTransport,
     },
 }
 
@@ -36,6 +38,13 @@ pub(crate) enum IceServerAddr {
 pub(crate) enum Aux {
     Servers(Vec<IceServerAddr>),
     RemoteCandidate(String),
+    /// From the stream task of TURN client `.0` (TCP/TLS transports).
+    TurnStream(usize, StreamEvent),
+}
+
+struct TurnStreamLink {
+    tx: mpsc::UnboundedSender<Vec<u8>>,
+    local: Option<SocketAddr>,
 }
 
 struct StunTxn {
@@ -46,23 +55,34 @@ struct StunTxn {
     next: Instant,
 }
 
-/// Parse W3C ICE server URLs into resolvable targets. TURN over TCP and TLS
-/// are skipped for now and reported in the log.
-fn parse_ice_url(url: &str) -> Option<(bool, String, u16)> {
+/// Parse W3C ICE server URLs (RFC 7064, RFC 7065) into resolvable targets:
+/// (is TURN, transport, host, port). `stuns:` and DTLS TURN are skipped and
+/// reported in the log, as Chromium does.
+fn parse_ice_url(url: &str) -> Option<(bool, TurnTransport, String, u16)> {
     let (scheme, rest) = url.split_once(':')?;
     let rest = rest.trim_start_matches("//");
     let (hostport, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let transport_q = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("transport="))
+        .map(|t| t.to_ascii_lowercase());
     let (is_turn, default_port) = match scheme {
         "stun" => (false, 3478),
         "turn" => (true, 3478),
-        "stuns" | "turns" => {
-            log::info!("ICE server {url}: TLS transport not supported yet, skipping");
+        "turns" => (true, 5349),
+        "stuns" => {
+            log::info!("ICE server {url}: STUN over TLS is not supported, skipping");
             return None;
         }
         _ => return None,
     };
-    if is_turn && query.contains("transport=tcp") {
-        log::info!("ICE server {url}: TCP transport not supported yet, skipping");
+    let tls = scheme == "turns";
+    if tls && transport_q.as_deref() == Some("udp") {
+        log::info!("ICE server {url}: TURN over DTLS is not supported, skipping");
+        return None;
+    }
+    if tls && !turn_stream::TLS_AVAILABLE {
+        log::info!("ICE server {url}: built without TLS support, skipping");
         return None;
     }
     let (host, port) = if let Some(h) = hostport.strip_prefix('[') {
@@ -77,14 +97,21 @@ fn parse_ice_url(url: &str) -> Option<(bool, String, u16)> {
             None => (hostport.to_string(), default_port),
         }
     };
-    Some((is_turn, host, port))
+    let transport = if tls {
+        TurnTransport::Tls(host.clone())
+    } else if is_turn && transport_q.as_deref() == Some("tcp") {
+        TurnTransport::Tcp
+    } else {
+        TurnTransport::Udp
+    };
+    Some((is_turn, transport, host, port))
 }
 
 pub(crate) async fn resolve_ice_servers(config: RtcConfiguration) -> Vec<IceServerAddr> {
     let mut out = Vec::new();
     for s in &config.ice_servers {
         for url in &s.urls {
-            let Some((is_turn, host, port)) = parse_ice_url(url) else {
+            let Some((is_turn, transport, host, port)) = parse_ice_url(url) else {
                 continue;
             };
             let lookup = tokio::time::timeout(
@@ -105,6 +132,7 @@ pub(crate) async fn resolve_ice_servers(config: RtcConfiguration) -> Vec<IceServ
                         addr,
                         username: s.username.clone().unwrap_or_default(),
                         password: s.credential.clone().unwrap_or_default(),
+                        transport: transport.clone(),
                     }
                 } else {
                     IceServerAddr::Stun(addr)
@@ -245,6 +273,8 @@ pub(crate) struct Driver {
     config: RtcConfiguration,
     relay_only: bool,
     turns: Vec<TurnClient>,
+    /// Stream links of TURN clients over TCP/TLS, by index in `turns`.
+    turn_streams: HashMap<usize, TurnStreamLink>,
     stun_txns: std::collections::HashMap<TransId, StunTxn>,
     gathered: Vec<Candidate>,
     resolving: bool,
@@ -383,6 +413,7 @@ impl Driver {
             config,
             relay_only,
             turns: Vec::new(),
+            turn_streams: HashMap::new(),
             stun_txns: HashMap::new(),
             gathered: Vec::new(),
             gathering_complete: false,
@@ -479,6 +510,7 @@ impl Driver {
                 Some(aux) = arx.recv() => match aux {
                     Aux::Servers(servers) => self.start_servers(servers),
                     Aux::RemoteCandidate(c) => self.add_remote_candidate_str(&c),
+                    Aux::TurnStream(ti, ev) => self.on_turn_stream(ti, ev),
                 },
                 cmd = cmds.recv() => match cmd {
                     Some(c) => self.handle_cmd(c),
@@ -494,6 +526,8 @@ impl Driver {
             let pkts = self.turns[i].close();
             self.send_to_server(i, pkts);
         }
+        // Dropping the writers lets stream tasks flush the deallocation and close.
+        self.turn_streams.clear();
         let _ = now;
         for r in readers {
             r.abort();
@@ -558,11 +592,9 @@ impl Driver {
     }
 
     fn handle_packet(&mut self, idx: usize, from: SocketAddr, data: &[u8]) {
-        if let Some(ti) = self
-            .turns
-            .iter()
-            .position(|t| t.sock_idx == idx && t.server == from)
-        {
+        if let Some(ti) = self.turns.iter().enumerate().position(|(i, t)| {
+            t.sock_idx == idx && t.server == from && !self.turn_streams.contains_key(&i)
+        }) {
             let (ev, out) = self.turns[ti].handle(Instant::now(), data);
             self.send_to_server(ti, out);
             self.on_turn_events(ti, ev);
@@ -1468,6 +1500,7 @@ impl Driver {
                     addr,
                     username,
                     password,
+                    transport,
                 } => {
                     let Some(idx) = self
                         .sockets
@@ -1476,10 +1509,27 @@ impl Driver {
                     else {
                         continue;
                     };
-                    let mut t = TurnClient::new(addr, idx, username, password);
+                    let reliable = transport != TurnTransport::Udp;
+                    let mut t = TurnClient::new(addr, idx, username, password, reliable);
                     let pkts = t.start(now);
                     self.turns.push(t);
-                    self.send_to_server(self.turns.len() - 1, pkts);
+                    let ti = self.turns.len() - 1;
+                    if reliable {
+                        // The writer buffers the Allocate until the stream is up.
+                        let (wtx, wrx) = mpsc::unbounded_channel();
+                        self.turn_streams.insert(
+                            ti,
+                            TurnStreamLink {
+                                tx: wtx,
+                                local: None,
+                            },
+                        );
+                        let atx = self.aux_tx.clone();
+                        tokio::spawn(turn_stream::run(addr, transport, wrx, move |ev| {
+                            let _ = atx.send(Aux::TurnStream(ti, ev));
+                        }));
+                    }
+                    self.send_to_server(ti, pkts);
                 }
             }
         }
@@ -1487,6 +1537,12 @@ impl Driver {
     }
 
     fn send_to_server(&self, ti: usize, pkts: Vec<Vec<u8>>) {
+        if let Some(link) = self.turn_streams.get(&ti) {
+            for p in pkts {
+                let _ = link.tx.send(p);
+            }
+            return;
+        }
         let t = &self.turns[ti];
         let sock = &self.sockets[t.sock_idx].socket;
         for p in pkts {
@@ -1496,17 +1552,45 @@ impl Driver {
         }
     }
 
+    fn on_turn_stream(&mut self, ti: usize, ev: StreamEvent) {
+        if ti >= self.turns.len() {
+            return;
+        }
+        match ev {
+            StreamEvent::Connected(local) => {
+                log::debug!(
+                    "TURN {} stream connected from {local}",
+                    self.turns[ti].server
+                );
+                if let Some(l) = self.turn_streams.get_mut(&ti) {
+                    l.local = Some(local);
+                }
+            }
+            StreamEvent::Frame(data) => {
+                let (ev, out) = self.turns[ti].handle(Instant::now(), &data);
+                self.send_to_server(ti, out);
+                self.on_turn_events(ti, ev);
+            }
+            StreamEvent::Closed(why) => {
+                let ev = self.turns[ti].transport_failed(&why);
+                self.on_turn_events(ti, ev);
+            }
+        }
+    }
+
     fn on_turn_events(&mut self, ti: usize, events: Vec<TurnEvent>) {
         for e in events {
             match e {
                 TurnEvent::Allocated { relay, mapped } => {
-                    let local = self.sockets[self.turns[ti].sock_idx].local;
+                    let stream_local = self.turn_streams.get(&ti).and_then(|l| l.local);
+                    let local = stream_local.unwrap_or(self.sockets[self.turns[ti].sock_idx].local);
                     log::debug!("TURN {} allocated relay {relay}", self.turns[ti].server);
                     match Candidate::relayed(relay, local, "udp") {
                         Ok(c) => self.add_gathered(c),
                         Err(e) => log::debug!("relay candidate {relay}: {e}"),
                     }
-                    if let Some(m) = mapped {
+                    // Over a stream the mapped address is the TCP one: not a UDP candidate.
+                    if let (Some(m), None) = (mapped, stream_local) {
                         self.add_srflx(self.turns[ti].sock_idx, m);
                     }
                     self.check_gathering_complete();
@@ -1910,5 +1994,64 @@ impl Driver {
             );
         }
         serde_json::Value::Object(out)
+    }
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    #[test]
+    fn ice_server_urls() {
+        let p = |u: &str| parse_ice_url(u).map(|(t, tr, h, port)| (t, tr, h, port));
+        assert_eq!(
+            p("stun:stun.example.org"),
+            Some((false, TurnTransport::Udp, "stun.example.org".into(), 3478))
+        );
+        assert_eq!(
+            p("turn:t.example.org:3479"),
+            Some((true, TurnTransport::Udp, "t.example.org".into(), 3479))
+        );
+        assert_eq!(
+            p("turn:t.example.org?transport=udp"),
+            Some((true, TurnTransport::Udp, "t.example.org".into(), 3478))
+        );
+        assert_eq!(
+            p("turn:[2001:db8::1]:3478?transport=tcp"),
+            Some((true, TurnTransport::Tcp, "2001:db8::1".into(), 3478))
+        );
+        assert_eq!(
+            p("turn:t.example.org?transport=TCP"),
+            Some((true, TurnTransport::Tcp, "t.example.org".into(), 3478))
+        );
+        assert_eq!(p("stuns:s.example.org"), None);
+        assert_eq!(
+            p("turns:t.example.org:5349?transport=udp"),
+            None,
+            "DTLS TURN is not supported"
+        );
+        assert_eq!(p("mailto:x@example.org"), None);
+        if turn_stream::TLS_AVAILABLE {
+            assert_eq!(
+                p("turns:t.example.org"),
+                Some((
+                    true,
+                    TurnTransport::Tls("t.example.org".into()),
+                    "t.example.org".into(),
+                    5349
+                ))
+            );
+            assert_eq!(
+                p("turns:t.example.org:443?transport=tcp"),
+                Some((
+                    true,
+                    TurnTransport::Tls("t.example.org".into()),
+                    "t.example.org".into(),
+                    443
+                ))
+            );
+        } else {
+            assert_eq!(p("turns:t.example.org"), None);
+        }
     }
 }

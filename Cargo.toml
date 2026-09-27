@@ -11,9 +11,9 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 log.workspace = true
-# Vendored 0.24.0 with one patch (VP8 PictureID, needed by SFUs); see vendor/str0m/PATCHES.md.
+# Vendored 0.24.0 with small patches; see vendor/str0m/PATCHES.md.
 str0m = { path = "../../vendor/str0m", version = "0.24", default-features = false, features = ["rust-crypto"] }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util"] }
 if-addrs = "0.13"
 rand = "0.9"
 hmac = "0.12"
@@ -24,6 +24,20 @@ tracing = { version = "0.1", features = ["log"] }
 rusty-opus = "0.9"
 sonora = "0.2"
 socket2 = { version = "0.6", features = ["all"] }
+# TURN over TLS (turns:). The crypto provider is chosen by feature.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "logging"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+webpki-roots = { version = "1", optional = true }
+rustls-rustcrypto = { version = "0.0.2-alpha", optional = true }
+
+[features]
+default = ["turn-tls-ring"]
+# ring: mature, compiles C and assembly.
+turn-tls-ring = ["_turn-tls", "rustls/ring", "tokio-rustls/ring"]
+# Pure Rust (RustCrypto). Pre-release provider; keeps the build free of C.
+turn-tls-rustcrypto = ["_turn-tls", "dep:rustls-rustcrypto"]
+_turn-tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-native-certs", "dep:webpki-roots"]
 
 [dev-dependencies]
 env_logger = "0.11"

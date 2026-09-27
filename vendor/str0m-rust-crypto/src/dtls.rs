@@ -148,7 +148,11 @@ fn self_signed_p256() -> Result<DtlsCert, Box<dyn std::error::Error>> {
     let subject = Name::from_str("CN=DTLS Peer,O=DTLS")?;
     let spki = SubjectPublicKeyInfoOwned::from_key(*key.verifying_key())?;
     let builder = CertificateBuilder::new(
-        Profile::Leaf { issuer: subject.clone(), enable_key_agreement: false, enable_key_encipherment: false },
+        Profile::Leaf {
+            issuer: subject.clone(),
+            enable_key_agreement: false,
+            enable_key_encipherment: false,
+        },
         SerialNumber::new(&serial)?,
         Validity::from_now(Duration::from_secs(365 * 24 * 3600))?,
         subject,

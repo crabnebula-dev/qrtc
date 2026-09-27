@@ -13,6 +13,7 @@ mod mdns;
 mod net;
 mod stun;
 mod turn;
+mod turn_stream;
 
 use crate::*;
 use audio::CaptureProcessing;

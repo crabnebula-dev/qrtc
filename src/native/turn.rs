@@ -1,6 +1,7 @@
-//! TURN client (RFC 8656) over UDP, as a sans-I/O state machine.
+//! TURN client (RFC 8656) as a sans-I/O state machine, over UDP or over a
+//! reliable stream (TCP or TLS, RFC 8656 section 3.1 / RFC 6062 framing).
 //!
-//! The driver feeds it packets from the TURN server and asks it to wrap
+//! The driver feeds it messages from the TURN server and asks it to wrap
 //! outgoing packets for relayed candidates. Permissions are installed on
 //! demand, channels are bound after the permission exists, and allocation,
 //! permissions and channels are refreshed before they expire.
@@ -15,6 +16,25 @@ const MAX_TRIES: u32 = 6;
 const PERMISSION_REFRESH: Duration = Duration::from_secs(240);
 const CHANNEL_REFRESH: Duration = Duration::from_secs(540);
 const SOFTWARE: &str = "tauri-plugin-webrtc";
+/// Over TCP/TLS requests are not retransmitted; a transaction fails after
+/// this long (RFC 8489 section 6.2.2: 39.5 s).
+const RELIABLE_TIMEOUT: Duration = Duration::from_millis(39_500);
+
+/// Length of the first complete STUN message or ChannelData frame in a
+/// stream buffer, or None while it is incomplete. ChannelData over a stream
+/// is padded to four bytes (RFC 8656 section 12.5).
+pub(crate) fn stream_frame_len(buf: &[u8]) -> Option<usize> {
+    if buf.len() < 4 {
+        return None;
+    }
+    let len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
+    let total = match buf[0] >> 6 {
+        0 => 20 + len,
+        1 => 4 + ((len + 3) & !3),
+        _ => return Some(usize::MAX), // not STUN or ChannelData: the stream is corrupt
+    };
+    (buf.len() >= total).then_some(total)
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum TurnEvent {
@@ -68,6 +88,8 @@ pub(crate) struct TurnClient {
     by_num: HashMap<u16, SocketAddr>,
     next_num: u16,
     closing: bool,
+    /// Stream transport (TCP/TLS): no retransmits, padded ChannelData.
+    reliable: bool,
 }
 
 impl TurnClient {
@@ -76,6 +98,7 @@ impl TurnClient {
         sock_idx: usize,
         username: String,
         password: String,
+        reliable: bool,
     ) -> Self {
         Self {
             server,
@@ -94,6 +117,7 @@ impl TurnClient {
             by_num: HashMap::new(),
             next_num: 0x4000,
             closing: false,
+            reliable,
         }
     }
 
@@ -120,7 +144,7 @@ impl TurnClient {
                 kind,
                 msg,
                 tries: 1,
-                next: now + RTO,
+                next: now + if self.reliable { RELIABLE_TIMEOUT } else { RTO },
                 auth_retried: false,
             },
         );
@@ -192,7 +216,7 @@ impl TurnClient {
                     txn.msg = fresh;
                     txn.auth_retried = true;
                     txn.tries = 1;
-                    txn.next = now + RTO;
+                    txn.next = now + if self.reliable { RELIABLE_TIMEOUT } else { RTO };
                     out.push(self.encode(&txn.msg));
                     self.txns.insert(txn.msg.tid, txn);
                 } else {
@@ -329,7 +353,13 @@ impl TurnClient {
             }
         }
         match self.chans.get(&peer) {
-            Some(c) if c.bound => out.push(encode_channel_data(c.num, data)),
+            Some(c) if c.bound => {
+                let mut frame = encode_channel_data(c.num, data);
+                if self.reliable {
+                    frame.resize((frame.len() + 3) & !3, 0);
+                }
+                out.push(frame)
+            }
             _ => {
                 let msg = Message::new(SEND_INDICATION);
                 let tid = msg.tid;
@@ -356,7 +386,7 @@ impl TurnClient {
             let Some(mut t) = self.txns.remove(&tid) else {
                 continue;
             };
-            if t.tries >= MAX_TRIES {
+            if self.reliable || t.tries >= MAX_TRIES {
                 self.on_failure(t.kind, "timeout".into(), &mut ev);
                 continue;
             }
@@ -417,6 +447,19 @@ impl TurnClient {
             );
         }
         d
+    }
+
+    /// The stream to the server could not be opened or was lost.
+    pub(crate) fn transport_failed(&mut self, why: &str) -> Vec<TurnEvent> {
+        let was_allocated = self.relay.is_some();
+        self.txns.clear();
+        self.closing = true;
+        if self.done && was_allocated {
+            log::warn!("TURN {}: connection lost: {why}", self.server);
+            return Vec::new();
+        }
+        self.done = true;
+        vec![TurnEvent::Failed(format!("TURN {}: {why}", self.server))]
     }
 
     /// Deallocate (Refresh with lifetime 0). Fire and forget.
