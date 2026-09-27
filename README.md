@@ -103,6 +103,7 @@ The patches are meant for upstream.
 ```sh
 cargo test --lib                                                     # defaults
 cargo test --lib --no-default-features --features turn-tls-rustcrypto,pq-hybrid
+node tests/pq-tls-interop.mjs pq-moduletto   # TURN TLS against OpenSSL 3.5+ (Node)
 ```
 
 The tests cover JSEP, media, TURN framing, DTMF, and post-quantum DTLS between
