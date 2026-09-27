@@ -10,6 +10,8 @@ mod audio;
 mod driver;
 mod jsep;
 mod mdns;
+#[cfg(feature = "_pq")]
+pub(crate) mod pq;
 mod net;
 mod stun;
 mod turn;
@@ -275,11 +277,18 @@ mod tests {
     use std::time::{Duration, Instant};
 
     fn peer(engine: &NativeEngine) -> (Box<dyn Peer>, smpsc::Receiver<PeerEvent>) {
+        peer_with(engine, &RtcConfiguration::default())
+    }
+
+    fn peer_with(
+        engine: &NativeEngine,
+        config: &RtcConfiguration,
+    ) -> (Box<dyn Peer>, smpsc::Receiver<PeerEvent>) {
         let (tx, rx) = smpsc::channel();
         let tx = Mutex::new(tx);
         let p = engine
             .create_peer(
-                &RtcConfiguration::default(),
+                config,
                 Arc::new(move |e| {
                     let _ = tx.lock().unwrap().send(e);
                 }),
@@ -291,9 +300,22 @@ mod tests {
     /// Two native peers in one process exchange data channel messages both ways.
     #[test]
     fn loopback_data_channel() {
+        let c = RtcConfiguration::default();
+        assert!(data_channel_between(&c, &c, Duration::from_secs(15)).is_some());
+    }
+
+    /// Open a data channel from a peer with config `ca` to one with `cb` and
+    /// exchange a message each way. Returns the stats of both peers, or None
+    /// when the channel did not open within `timeout`.
+    fn data_channel_between(
+        ca: &RtcConfiguration,
+        cb: &RtcConfiguration,
+        timeout: Duration,
+    ) -> Option<(serde_json::Value, serde_json::Value)> {
+        let _ = env_logger::builder().is_test(true).try_init();
         let engine = NativeEngine::new().unwrap();
-        let (a, rx_a) = peer(&engine);
-        let (b, rx_b) = peer(&engine);
+        let (a, rx_a) = peer_with(&engine, ca);
+        let (b, rx_b) = peer_with(&engine, cb);
         let dc = a
             .create_data_channel("chat", &DataChannelInit::default())
             .unwrap();
@@ -305,7 +327,7 @@ mod tests {
         b.set_local_description(&answer).unwrap();
         a.set_remote_description(&answer).unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + timeout;
         let (mut a_got, mut b_got, mut b_handle) = (None, None, None);
         while Instant::now() < deadline && (a_got.is_none() || b_got.is_none()) {
             while let Ok(e) = rx_a.try_recv() {
@@ -345,10 +367,51 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(b_got.as_deref(), Some("hello"));
-        assert_eq!(a_got, Some(vec![1, 2, 3]));
+        let ok = b_got.as_deref() == Some("hello") && a_got == Some(vec![1, 2, 3]);
+        let stats = ok.then(|| (a.stats().unwrap(), b.stats().unwrap()));
         a.close();
         b.close();
+        stats
+    }
+
+    #[cfg(feature = "_pq")]
+    fn tls_group(stats: &serde_json::Value) -> Option<String> {
+        stats.as_object()?.values().find(|v| v["type"] == "transport")?["tlsGroup"]
+            .as_str()
+            .map(String::from)
+    }
+
+    /// Post-quantum DTLS between engines: both preferring gets a hybrid
+    /// group, one side off falls back to classical DTLS 1.2, and require
+    /// against off does not connect.
+    #[cfg(feature = "_pq")]
+    #[test]
+    fn post_quantum_dtls_between_engines() {
+        use crate::PqPolicy;
+        let cfg = |p| RtcConfiguration {
+            post_quantum: Some(p),
+            ..Default::default()
+        };
+        let t = Duration::from_secs(15);
+        let hybrid = "X25519MLKEM768";
+
+        let (a, b) = data_channel_between(&cfg(PqPolicy::Prefer), &cfg(PqPolicy::Prefer), t).expect("prefer/prefer");
+        assert_eq!(tls_group(&a).as_deref(), Some(hybrid));
+        assert_eq!(tls_group(&b).as_deref(), Some(hybrid));
+
+        let (a, b) = data_channel_between(&cfg(PqPolicy::Require), &cfg(PqPolicy::Prefer), t).expect("require/prefer");
+        assert_eq!(tls_group(&a).as_deref(), Some(hybrid));
+        assert_eq!(tls_group(&b).as_deref(), Some(hybrid));
+
+        let (a, b) = data_channel_between(&cfg(PqPolicy::Prefer), &cfg(PqPolicy::Off), t).expect("prefer/off");
+        assert_eq!(tls_group(&a), None);
+        assert_eq!(tls_group(&b), None);
+        let (a, b) = data_channel_between(&cfg(PqPolicy::Off), &cfg(PqPolicy::Prefer), t).expect("off/prefer");
+        assert_eq!(tls_group(&a), None);
+        assert_eq!(tls_group(&b), None);
+
+        assert!(data_channel_between(&cfg(PqPolicy::Require), &cfg(PqPolicy::Off), Duration::from_secs(8)).is_none());
+        assert!(data_channel_between(&cfg(PqPolicy::Off), &cfg(PqPolicy::Require), Duration::from_secs(8)).is_none());
     }
 
     /// Codec parameter edits are tolerated (matrix-js-sdk adds usedtx=1) and

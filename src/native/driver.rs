@@ -276,6 +276,10 @@ pub(crate) struct Driver {
     turns: Vec<TurnClient>,
     /// Stream links of TURN clients over TCP/TLS, by index in `turns`.
     turn_streams: HashMap<usize, TurnStreamLink>,
+    /// Post-quantum policy for DTLS and TURN over TLS.
+    pq: crate::PqPolicy,
+    /// Post-quantum DTLS key exchange group, once negotiated.
+    dtls_group: Option<&'static str>,
     stun_txns: std::collections::HashMap<TransId, StunTxn>,
     gathered: Vec<Candidate>,
     resolving: bool,
@@ -437,11 +441,34 @@ impl Driver {
                     .add_h264(pt.into(), Some(rtx.into()), true, profile);
             }
         }
-        let rtc = cfg
+        #[cfg_attr(not(feature = "_pq"), allow(unused_mut))]
+        let mut cfg = cfg
             // TWCC bandwidth estimation drives the page's video encoder bitrate.
             .enable_bwe(Some(str0m::bwe::Bitrate::kbps(800)))
-            .set_stats_interval(Some(Duration::from_secs(1)))
-            .build(now);
+            .set_stats_interval(Some(Duration::from_secs(1)));
+        // Post-quantum key agreement needs DTLS 1.3. `prefer` auto-senses the
+        // version (a hybrid ClientHello, or the peer's ClientHello decides),
+        // so DTLS 1.2 peers still connect with classical groups.
+        let pq = config.post_quantum.unwrap_or_else(crate::default_pq_policy);
+        #[cfg(feature = "_pq")]
+        if let Some(p) = super::pq::dtls::str0m_provider(pq) {
+            use str0m::config::DtlsVersion;
+            cfg = cfg.set_crypto_provider(p).set_dtls_version(match pq {
+                crate::PqPolicy::Require => DtlsVersion::Dtls13,
+                _ => DtlsVersion::Auto,
+            });
+        }
+        #[cfg(not(feature = "_pq"))]
+        if pq != crate::PqPolicy::Off {
+            return Err(crate::Error::NotSupported(
+                "postQuantum needs the pq-hybrid or pq-moduletto feature".into(),
+            ));
+        }
+        let rtc = cfg.build(now);
+        // Building runs the DTLS provider self-test, which exercises every
+        // group; that is not a negotiation.
+        #[cfg(feature = "_pq")]
+        super::pq::take_negotiated();
         let sockets = bind_host_sockets().map_err(op("bind sockets"))?;
         if sockets.is_empty() {
             return Err(Error::Operation("no usable network interface".into()));
@@ -455,6 +482,8 @@ impl Driver {
             relay_only,
             turns: Vec::new(),
             turn_streams: HashMap::new(),
+            pq,
+            dtls_group: None,
             stun_txns: HashMap::new(),
             gathered: Vec::new(),
             gathering_complete: false,
@@ -585,7 +614,9 @@ impl Driver {
     /// Drain `poll_output` until it yields a timeout. Called after every mutation.
     fn drain(&mut self) {
         loop {
-            match self.rtc.poll_output() {
+            let out = self.rtc.poll_output();
+            self.note_dtls_group();
+            match out {
                 Ok(Output::Timeout(t)) => {
                     self.timeout = t;
                     return;
@@ -680,7 +711,9 @@ impl Driver {
         if !self.rtc.accepts(&input) {
             return;
         }
-        if let Err(e) = self.rtc.handle_input(input) {
+        let res = self.rtc.handle_input(input);
+        self.note_dtls_group();
+        if let Err(e) = res {
             log::debug!("handle_input: {e}");
         }
         self.drain();
@@ -1594,7 +1627,7 @@ impl Driver {
                             },
                         );
                         let atx = self.aux_tx.clone();
-                        tokio::spawn(turn_stream::run(addr, transport, wrx, move |ev| {
+                        tokio::spawn(turn_stream::run(addr, transport, self.pq, wrx, move |ev| {
                             let _ = atx.send(Aux::TurnStream(ti, ev));
                         }));
                     }
@@ -1685,7 +1718,9 @@ impl Driver {
                         },
                     );
                     if self.rtc.accepts(&input) {
-                        if let Err(e) = self.rtc.handle_input(input) {
+                        let res = self.rtc.handle_input(input);
+                        self.note_dtls_group();
+                        if let Err(e) = res {
                             log::debug!("relayed input: {e}");
                         }
                         self.drain();
@@ -1711,7 +1746,9 @@ impl Driver {
     fn on_timer(&mut self) {
         let now = Instant::now();
         if now >= self.timeout {
-            if let Err(e) = self.rtc.handle_input(Input::Timeout(now)) {
+            let res = self.rtc.handle_input(Input::Timeout(now));
+            self.note_dtls_group();
+            if let Err(e) = res {
                 log::debug!("timeout input: {e}");
             }
             self.drain();
@@ -2038,6 +2075,15 @@ impl Driver {
         }
     }
 
+    /// Record the post-quantum group if the last `handle_input` ran a DTLS
+    /// key exchange with one.
+    fn note_dtls_group(&mut self) {
+        #[cfg(feature = "_pq")]
+        if let Some(g) = super::pq::take_negotiated() {
+            self.dtls_group = Some(g.name());
+        }
+    }
+
     fn stats_json(&self) -> serde_json::Value {
         use serde_json::json;
         let open = self.chans.values().filter(|c| c.open).count();
@@ -2050,7 +2096,9 @@ impl Driver {
             out.insert(
                 "T".into(),
                 json!({"type": "transport", "id": "T", "bytesSent": s.peer_bytes_tx, "bytesReceived": s.peer_bytes_rx,
-                       "dtlsState": if self.dtls_connected { "connected" } else { "new" }}),
+                       "dtlsState": if self.dtls_connected { "connected" } else { "new" },
+                       // W3C RTCTransportStats.tlsGroup, reported for post-quantum groups.
+                       "tlsGroup": self.dtls_group}),
             );
             if let Some(p) = &s.selected_candidate_pair {
                 out.insert(
@@ -2062,6 +2110,14 @@ impl Driver {
                 out.insert("LC".into(), json!({"type": "local-candidate", "id": "LC", "address": p.local.addr.ip().to_string(), "port": p.local.addr.port()}));
                 out.insert("RC".into(), json!({"type": "remote-candidate", "id": "RC", "address": p.remote.addr.ip().to_string(), "port": p.remote.addr.port()}));
             }
+        }
+        if !out.contains_key("T") {
+            out.insert(
+                "T".into(),
+                json!({"type": "transport", "id": "T",
+                       "dtlsState": if self.dtls_connected { "connected" } else { "new" },
+                       "tlsGroup": self.dtls_group}),
+            );
         }
         for (tx, rx) in &self.audio_receivers {
             let (depth, underruns, trimmed, target) = self

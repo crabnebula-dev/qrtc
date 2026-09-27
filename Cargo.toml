@@ -30,6 +30,15 @@ tokio-rustls = { version = "0.26", default-features = false, optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
 webpki-roots = { version = "1", optional = true }
 rustls-rustcrypto = { version = "0.0.2-alpha", optional = true }
+# Post-quantum key agreement (features pq-hybrid, pq-moduletto).
+dimpl = { version = "0.7.4", default-features = false, features = ["rust-crypto"], optional = true }
+str0m-rust-crypto = { path = "../../vendor/str0m-rust-crypto", version = "0.6", optional = true }
+ml-kem = { version = "0.3.2", features = ["getrandom", "zeroize"], optional = true }
+x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
+getrandom = { version = "0.3", optional = true }
+zeroize = { version = "1", optional = true }
+# ML-KEM-512 and ML-KEM-768 (FIPS 203) from moduletto, MIT OR Apache-2.0.
+moduletto = { git = "https://github.com/crabnebula-dev/moduletto", branch = "main", optional = true }
 
 [features]
 default = ["turn-tls-ring"]
@@ -38,6 +47,17 @@ turn-tls-ring = ["_turn-tls", "rustls/ring", "tokio-rustls/ring"]
 # Pure Rust (RustCrypto). Pre-release provider; keeps the build free of C.
 turn-tls-rustcrypto = ["_turn-tls", "dep:rustls-rustcrypto"]
 _turn-tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-native-certs", "dep:webpki-roots"]
+# Post-quantum key agreement for DTLS 1.3 and TURN over TLS: X25519MLKEM768
+# (what browsers and TLS servers negotiate) and MLKEM768. Enable per
+# connection with RtcConfiguration.postQuantum. Pick one ML-KEM backend,
+# both pure Rust:
+# RustCrypto ml-kem.
+pq-hybrid = ["_pq", "dep:ml-kem"]
+# moduletto (NEON on aarch64). Also adds ML-KEM-512 and an X25519+ML-KEM-512
+# hybrid on a private codepoint, which only this engine speaks. Takes
+# precedence over ml-kem when both features are on.
+pq-moduletto = ["_pq", "dep:moduletto"]
+_pq = ["dep:dimpl", "dep:str0m-rust-crypto", "dep:x25519-dalek", "dep:getrandom", "dep:zeroize"]
 
 [dev-dependencies]
 env_logger = "0.11"

@@ -40,6 +40,7 @@ pub(crate) const TLS_AVAILABLE: bool = cfg!(any(
 pub(crate) async fn run(
     server: SocketAddr,
     transport: TurnTransport,
+    pq: crate::PqPolicy,
     mut outgoing: mpsc::UnboundedReceiver<Vec<u8>>,
     report: impl Fn(StreamEvent) + Send + 'static,
 ) {
@@ -59,7 +60,7 @@ pub(crate) async fn run(
             report(StreamEvent::Connected(local));
             pump(tcp, &mut outgoing, &report).await
         }
-        TurnTransport::Tls(host) => match tls::connect(tcp, &host).await {
+        TurnTransport::Tls(host) => match tls::connect(tcp, &host, pq).await {
             Ok(s) => {
                 report(StreamEvent::Connected(local));
                 pump(s, &mut outgoing, &report).await
@@ -112,58 +113,113 @@ async fn pump<S: AsyncRead + AsyncWrite + Unpin>(
 
 #[cfg(any(feature = "turn-tls-ring", feature = "turn-tls-rustcrypto"))]
 mod tls {
+    use crate::PqPolicy;
     use std::sync::{Arc, OnceLock};
     use tokio::net::TcpStream;
     use tokio_rustls::rustls::{self, pki_types::ServerName};
 
-    fn provider() -> Arc<rustls::crypto::CryptoProvider> {
+    fn provider(pq: PqPolicy) -> Result<Arc<rustls::crypto::CryptoProvider>, String> {
         #[cfg(feature = "turn-tls-ring")]
-        return Arc::new(rustls::crypto::ring::default_provider());
+        let base = rustls::crypto::ring::default_provider();
         #[cfg(all(feature = "turn-tls-rustcrypto", not(feature = "turn-tls-ring")))]
-        return Arc::new(rustls_rustcrypto::provider());
+        let base = rustls_rustcrypto::provider();
+        match pq {
+            PqPolicy::Off => Ok(Arc::new(base)),
+            #[cfg(feature = "_pq")]
+            _ => Ok(Arc::new(super::super::pq::tls::with_pq_groups(base, pq))),
+            #[cfg(not(feature = "_pq"))]
+            _ => Err("postQuantum needs the pq-hybrid or pq-moduletto feature".into()),
+        }
     }
 
     /// Certificates are checked against the platform trust store, with
     /// Mozilla's roots as the fallback when the platform store is empty.
-    fn config() -> Result<Arc<rustls::ClientConfig>, String> {
-        static CONFIG: OnceLock<Result<Arc<rustls::ClientConfig>, String>> = OnceLock::new();
-        CONFIG
-            .get_or_init(|| {
-                let mut roots = rustls::RootCertStore::empty();
-                let native = rustls_native_certs::load_native_certs();
-                for e in &native.errors {
-                    log::debug!("platform certificate store: {e}");
-                }
-                let (added, _) = roots.add_parsable_certificates(native.certs);
-                if added == 0 {
-                    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-                }
-                let cfg = rustls::ClientConfig::builder_with_provider(provider())
-                    .with_safe_default_protocol_versions()
-                    .map_err(|e| e.to_string())?
-                    .with_root_certificates(roots)
-                    .with_no_client_auth();
-                Ok(Arc::new(cfg))
-            })
-            .clone()
+    fn config(pq: PqPolicy) -> Result<Arc<rustls::ClientConfig>, String> {
+        type Cell = OnceLock<Result<Arc<rustls::ClientConfig>, String>>;
+        static OFF: Cell = OnceLock::new();
+        static PREFER: Cell = OnceLock::new();
+        static REQUIRE: Cell = OnceLock::new();
+        let cell = match pq {
+            PqPolicy::Off => &OFF,
+            PqPolicy::Prefer => &PREFER,
+            PqPolicy::Require => &REQUIRE,
+        };
+        cell.get_or_init(|| {
+            let mut roots = rustls::RootCertStore::empty();
+            let native = rustls_native_certs::load_native_certs();
+            for e in &native.errors {
+                log::debug!("platform certificate store: {e}");
+            }
+            let (added, _) = roots.add_parsable_certificates(native.certs);
+            if added == 0 {
+                roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            }
+            let builder = rustls::ClientConfig::builder_with_provider(provider(pq)?);
+            // Post-quantum groups exist only in TLS 1.3.
+            let builder = if pq == PqPolicy::Require {
+                builder.with_protocol_versions(&[&rustls::version::TLS13])
+            } else {
+                builder.with_safe_default_protocol_versions()
+            };
+            let cfg = builder
+                .map_err(|e| e.to_string())?
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            Ok(Arc::new(cfg))
+        })
+        .clone()
     }
 
     pub(super) async fn connect(
         tcp: TcpStream,
         host: &str,
+        pq: PqPolicy,
     ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, String> {
         let name = ServerName::try_from(host.to_string()).map_err(|e| e.to_string())?;
-        tokio_rustls::TlsConnector::from(config()?)
+        let s = tokio_rustls::TlsConnector::from(config(pq)?)
             .connect(name, tcp)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        let group = s.get_ref().1.negotiated_key_exchange_group().map(|g| g.name());
+        log::debug!("TURN TLS {host}: key exchange {group:?}");
+        Ok(s)
+    }
+
+    /// Post-quantum TLS against an independent implementation. Run by
+    /// `tests/pq-tls-interop.mjs`, which starts an OpenSSL 3.5 server
+    /// (Node's TLS) offering only X25519MLKEM768 and sets PQ_TLS_PORT and
+    /// SSL_CERT_FILE.
+    #[cfg(feature = "_pq")]
+    #[tokio::test]
+    #[ignore]
+    async fn post_quantum_against_openssl() {
+        let port: u16 = std::env::var("PQ_TLS_PORT").expect("PQ_TLS_PORT").parse().unwrap();
+        for (pq, expect) in [
+            (PqPolicy::Require, Some("X25519MLKEM768")),
+            (PqPolicy::Prefer, Some("X25519MLKEM768")),
+            (PqPolicy::Off, None),
+        ] {
+            let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            let r = connect(tcp, "localhost", pq).await;
+            let group = r
+                .as_ref()
+                .ok()
+                .and_then(|s| s.get_ref().1.negotiated_key_exchange_group())
+                .map(|g| format!("{:?}", g.name()));
+            eprintln!("{pq:?}: {:?}", r.as_ref().err().map(String::as_str).or(group.as_deref()));
+            match expect {
+                Some(g) => assert_eq!(group.as_deref(), Some(g), "{pq:?}"),
+                // The server offers only X25519MLKEM768, so classical fails.
+                None => assert!(r.is_err(), "{pq:?} should fail"),
+            }
+        }
     }
 }
 
 #[cfg(not(any(feature = "turn-tls-ring", feature = "turn-tls-rustcrypto")))]
 mod tls {
     use tokio::net::TcpStream;
-    pub(super) async fn connect(_: TcpStream, _: &str) -> Result<TcpStream, String> {
+    pub(super) async fn connect(_: TcpStream, _: &str, _: crate::PqPolicy) -> Result<TcpStream, String> {
         Err("built without a TLS provider (feature turn-tls-ring or turn-tls-rustcrypto)".into())
     }
 }

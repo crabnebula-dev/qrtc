@@ -95,6 +95,37 @@ pub struct RtcConfiguration {
     /// VP8 only.
     #[serde(default)]
     pub video_codecs: Option<Vec<String>>,
+    /// Not W3C: post-quantum key agreement for DTLS (media and data
+    /// channels) and TURN over TLS: `"off"`, `"prefer"` or `"require"`.
+    /// Absent means the engine default ([`default_pq_policy`]). Needs the
+    /// `pq-hybrid` or `pq-moduletto` feature; without it anything but `"off"` is an error.
+    #[serde(default)]
+    pub post_quantum: Option<PqPolicy>,
+}
+
+/// How post-quantum key agreement is used for a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PqPolicy {
+    /// Classical groups only, DTLS 1.2.
+    #[default]
+    Off,
+    /// Offer the hybrid post-quantum groups first (DTLS 1.3), falling back
+    /// to classical groups and DTLS 1.2 when the peer lacks them.
+    Prefer,
+    /// Post-quantum groups only, DTLS 1.3 only. Peers without them fail to
+    /// connect.
+    Require,
+}
+
+/// The policy used when a configuration does not set `postQuantum`:
+/// `prefer` when built with `pq-hybrid` or `pq-moduletto`, otherwise `off`.
+pub fn default_pq_policy() -> PqPolicy {
+    if cfg!(feature = "_pq") {
+        PqPolicy::Prefer
+    } else {
+        PqPolicy::Off
+    }
 }
 
 /// One entry of `RTCRtpTransceiver.setCodecPreferences()` (an
