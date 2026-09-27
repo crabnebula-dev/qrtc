@@ -1,0 +1,53 @@
+# cargo-deny: licences, advisories, banned crates and sources.
+# CI runs `cargo deny --all-features check`.
+
+[graph]
+all-features = true
+
+[advisories]
+# RustSec advisories fail the check; yanked crates too.
+yanked = "deny"
+git-fetch-with-cli = true
+# Each ignore is reviewed against how qrtc uses the crate. All four
+# reach qrtc only through rustls-rustcrypto (feature turn-tls-rustcrypto),
+# a pre-release provider. Revisit when it releases.
+ignore = [
+    # rustls-webpki 0.102.8: CRL and name-constraint bugs in certificate
+    # path validation. rustls-rustcrypto imports only its algorithm id
+    # constants (verify/{rsa,ecdsa,eddsa}.rs); rustls validates paths with
+    # its own rustls-webpki 0.103, which is fixed.
+    { id = "RUSTSEC-2026-0049", reason = "0.102.8 only supplies alg_id constants; path validation uses rustls-webpki 0.103" },
+    { id = "RUSTSEC-2026-0098", reason = "0.102.8 only supplies alg_id constants; path validation uses rustls-webpki 0.103" },
+    { id = "RUSTSEC-2026-0099", reason = "0.102.8 only supplies alg_id constants; path validation uses rustls-webpki 0.103" },
+    { id = "RUSTSEC-2026-0104", reason = "0.102.8 only supplies alg_id constants; path validation uses rustls-webpki 0.103" },
+    # rsa (Marvin): timing leak in RSA private-key operations. qrtc holds
+    # no RSA private key; TURN over TLS uses no client certificate.
+    { id = "RUSTSEC-2023-0071", reason = "no RSA private-key operations in qrtc" },
+    # paste: unmaintained proc-macro, build time only.
+    { id = "RUSTSEC-2024-0436", reason = "build-time proc-macro, no runtime code" },
+]
+
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CDLA-Permissive-2.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies (vendor/) carry versions, so wildcards stay denied.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/crabnebula-dev/moduletto"]

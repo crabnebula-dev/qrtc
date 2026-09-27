@@ -48,7 +48,7 @@ x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
 getrandom = { version = "0.3", optional = true }
 zeroize = { version = "1", optional = true }
 # ML-KEM-512 and ML-KEM-768 (FIPS 203) from moduletto, MIT OR Apache-2.0.
-moduletto = { git = "https://github.com/crabnebula-dev/moduletto", branch = "main", optional = true }
+moduletto = { git = "https://github.com/crabnebula-dev/moduletto", branch = "main", version = "0.1", optional = true }
 
 [features]
 default = ["turn-tls-ring", "pq-moduletto"]

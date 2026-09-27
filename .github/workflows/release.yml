@@ -1,0 +1,61 @@
+name: Release
+
+# Runs when a version tag (v0.1.0, ...) is pushed. Sign the tag yourself
+# (git tag -s v0.1.0) before pushing it. The workflow checks the version,
+# runs the tests, then publishes a GitHub release with the source archive,
+# the SBOM, SHA-256 sums and build provenance attestations for all three.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-cyclonedx@0.5.9
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24
+
+      - name: Tag matches Cargo.toml version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).packages.find(p=>p.name==="qrtc").version))')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"; exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - run: cargo test --lib
+      - run: node tests/sbom-check.mjs
+
+      - name: Source archive, SBOM, checksums
+        run: |
+          mkdir dist
+          git archive --format=tar.gz --prefix="qrtc-$VERSION/" -o "dist/qrtc-$VERSION.tar.gz" "$GITHUB_REF_NAME"
+          cp sbom/qrtc.cdx.json "dist/qrtc-$VERSION.cdx.json"
+          (cd dist && sha256sum * > SHA256SUMS)
+
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: |
+            dist/qrtc-*.tar.gz
+            dist/qrtc-*.cdx.json
+            dist/SHA256SUMS
+
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes --title "qrtc $VERSION"

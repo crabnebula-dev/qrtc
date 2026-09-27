@@ -104,11 +104,30 @@ The patches are meant for upstream.
 cargo test --lib                                                     # defaults
 cargo test --lib --no-default-features --features turn-tls-rustcrypto,pq-hybrid
 node tests/pq-tls-interop.mjs pq-moduletto   # TURN TLS against OpenSSL 3.5+ (Node)
+cargo build --example stdio_peer && (cd tests && npm ci) && node tests/chromium-interop.mjs
+node tests/sbom-check.mjs                    # SBOM matches Cargo.lock
+cargo deny --all-features check              # advisories, licences, sources
 ```
 
-The tests cover JSEP, media, TURN framing, DTMF, and post-quantum DTLS between
-engines for every policy pair. Browser, LiveKit, Matrix and TURN server suites
-live in tauri-plugin-webrtc.
+The unit tests cover JSEP, media, TURN framing, DTMF, and post-quantum DTLS
+between engines for every policy pair. `chromium-interop.mjs` checks data
+channels both ways against headless Chromium: DTLS 1.2 against default
+Chromium, X25519MLKEM768 over DTLS 1.3 with Chromium's post-quantum field
+trials, and `Require` failing to connect against default Chromium. LiveKit,
+Matrix and TURN server suites live in tauri-plugin-webrtc.
+
+CI (`.github/workflows/ci.yml`) runs all of the above, plus `rustfmt`,
+`clippy -D warnings` and warning-free docs for four feature sets. The unit
+tests run on x86_64 and aarch64 Linux and on aarch64 macOS, for three feature sets.
+It also checks MSRV 1.91 and that the `turn-tls-rustcrypto` builds contain
+no C code. Windows runs but does not block, as it is not yet verified. CI runs
+again weekly for new advisories. `deny.toml` records why each ignored
+advisory does not reach qrtc.
+
+A signed `v*` tag triggers `.github/workflows/release.yml`. It checks the
+tag against the crate version, runs the tests, then publishes a GitHub
+release. The release carries the source archive, the SBOM and SHA-256 sums,
+each with a build provenance attestation.
 
 Minimum Rust: 1.91.
 

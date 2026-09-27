@@ -3,26 +3,206 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+  # Weekly, to catch new RustSec advisories and changes on moduletto main.
+  schedule:
+    - cron: "17 5 * * 1"
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+# Actions are pinned by commit. The tag each SHA was taken from is noted.
 jobs:
-  test:
+  lint:
+    name: fmt, clippy (${{ matrix.name }})
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        features:
+        include:
+          - name: default
+            features: ""
+          - name: pure Rust, RustCrypto ML-KEM
+            features: "--no-default-features --features turn-tls-rustcrypto,pq-hybrid"
+          - name: pure Rust, moduletto
+            features: "--no-default-features --features turn-tls-rustcrypto,pq-moduletto"
+          - name: classical
+            features: "--no-default-features"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets ${{ matrix.features }} -- -D warnings
+      - name: Docs build without warnings
+        run: cargo doc --no-deps ${{ matrix.features }}
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  test:
+    name: test (${{ matrix.os }}, ${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # x86_64 Linux, aarch64 Linux (moduletto NEON path), aarch64 macOS.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        name: [default, pure Rust, classical]
+        include:
           # Default: TURN over TLS with ring, post-quantum with moduletto.
-          - ""
+          - name: default
+            features: ""
           # Pure Rust throughout, RustCrypto ML-KEM.
-          - "--no-default-features --features turn-tls-rustcrypto,pq-hybrid"
+          - name: pure Rust
+            features: "--no-default-features --features turn-tls-rustcrypto,pq-hybrid"
           # Classical only.
-          - "--no-default-features"
+          - name: classical
+            features: "--no-default-features"
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Tests (JSEP, media, TURN, DTMF, post-quantum DTLS between engines)
         run: cargo test --lib ${{ matrix.features }}
+      - name: Examples build
+        run: cargo build --examples ${{ matrix.features }}
+
+  windows:
+    # Not yet verified on Windows: reported, not blocking.
+    name: test (windows-latest, default, experimental)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo test --lib
+
+  msrv:
+    name: MSRV 1.91 (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            features: ""
+          - name: pure Rust
+            features: "--no-default-features --features turn-tls-rustcrypto,pq-hybrid"
+          - name: classical
+            features: "--no-default-features"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: "1.91"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - run: cargo check --all-targets ${{ matrix.features }}
+
+  pure-rust:
+    # The README promises no C in the turn-tls-rustcrypto builds.
+    name: no C code in pure Rust builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - name: No -sys crates, cc, cmake, bindgen, ring or aws-lc
+        run: |
+          status=0
+          for pq in pq-hybrid pq-moduletto; do
+            found=$(cargo tree -e normal,build --prefix none --target all \
+                      --no-default-features --features "turn-tls-rustcrypto,$pq" \
+                    | sed 's/ (\*)//' | sort -u \
+                    | grep -E -- '-sys v|^(cc|cmake|bindgen|ring|aws-lc-rs|aws-lc-sys) v' || true)
+            if [ -n "$found" ]; then
+              echo "::error::turn-tls-rustcrypto,$pq pulls in native code:"; echo "$found"; status=1
+            else
+              echo "turn-tls-rustcrypto,$pq: pure Rust"
+            fi
+          done
+          exit $status
+
+  supply-chain:
+    name: cargo-deny (advisories, licences, bans, sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
+        with:
+          command: check
+          arguments: --all-features
+
+  sbom:
+    # sbom/qrtc.cdx.json must describe the current dependency tree.
+    name: SBOM matches Cargo.lock
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2
+        with:
+          tool: cargo-cyclonedx@0.5.9
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24
+      - run: node tests/sbom-check.mjs
+
+  interop-openssl:
+    # TURN over TLS: rustls with X25519MLKEM768 against OpenSSL 3.5 (Node's).
+    name: post-quantum TLS vs OpenSSL (${{ matrix.pq }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pq: [pq-moduletto, pq-hybrid]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24
+      - run: node tests/pq-tls-interop.mjs ${{ matrix.pq }}
+
+  interop-chromium:
+    # Data channels both ways against headless Chromium, and the DTLS group:
+    # DTLS 1.2 against default Chromium, X25519MLKEM768 over DTLS 1.3 with
+    # Chromium's post-quantum field trials, and Require failing closed.
+    name: interop with Chromium (DTLS 1.2 and post-quantum DTLS 1.3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24
+      - run: cargo build --example stdio_peer
+      - working-directory: tests
+        run: |
+          npm ci
+          npx playwright-core install --with-deps chromium
+      - run: node tests/chromium-interop.mjs
