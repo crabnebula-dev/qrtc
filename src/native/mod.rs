@@ -102,6 +102,7 @@ pub(crate) enum Cmd {
     RestartIce,
     Pcm(TxId, Vec<i16>),
     Transform(TxId, bool, bool),
+    Dtmf(TxId, u8, u32),
     AudioProcessing(TxId, CaptureProcessing),
     DecodeAudio(TxId, Vec<u8>),
     AddIce(IceCandidate, Reply<()>),
@@ -168,6 +169,13 @@ impl Peer for NativePeer {
     }
     fn set_transform(&self, tx: TxId, send: bool, recv: bool) -> Result<()> {
         let _ = self.tx.send(Cmd::Transform(tx, send, recv));
+        Ok(())
+    }
+    fn insert_dtmf(&self, tx: TxId, event: u8, duration_ms: u32) -> Result<()> {
+        if event > 15 {
+            return Err(Error::Syntax(format!("DTMF event {event}")));
+        }
+        let _ = self.tx.send(Cmd::Dtmf(tx, event, duration_ms));
         Ok(())
     }
     fn set_audio_processing(
@@ -625,6 +633,68 @@ mod media_tests {
             st.is_empty(),
             "remote-created transceiver removed on rollback"
         );
+    }
+
+    /// DTMF: tones sent with the audio arrive as RFC 4733 events, in order.
+    #[test]
+    fn dtmf_between_engines() {
+        let engine = NativeEngine::new().unwrap();
+        let (a, rx_a) = peer(&engine);
+        let (b, rx_b) = peer(&engine);
+        a.upsert_transceiver(spec(
+            1,
+            TrackKind::Audio,
+            Direction::Sendonly,
+            "s",
+            "t",
+            true,
+        ))
+        .unwrap();
+        let offer = a.create_offer().unwrap();
+        assert!(offer.sdp.contains("telephone-event/48000"), "{}", offer.sdp);
+        a.set_local_description(&offer).unwrap();
+        let st = b.set_remote_description(&offer).unwrap();
+        let b_tx = st[0].id;
+        let answer = b.create_answer().unwrap();
+        assert!(answer.sdp.contains("telephone-event/48000"));
+        b.set_local_description(&answer).unwrap();
+        a.set_remote_description(&answer).unwrap();
+        let start = Instant::now();
+        let mut sent = false;
+        let mut n = 0u64;
+        while start.elapsed() < Duration::from_secs(8) {
+            for (rx, other) in [(&rx_a, &*b), (&rx_b, &*a)] {
+                while let Ok(e) = rx.try_recv() {
+                    if let PeerEvent::IceCandidate { candidate: Some(c) } = e {
+                        other.add_ice_candidate(&c).unwrap();
+                    }
+                }
+            }
+            // 20 ms of a 440 Hz tone per round.
+            let pcm: Vec<i16> = (0..960)
+                .map(|i| {
+                    (((n * 960 + i) as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin()
+                        * 8000.0) as i16
+                })
+                .collect();
+            n += 1;
+            a.push_pcm(1, pcm).unwrap();
+            if !sent && start.elapsed() > Duration::from_secs(2) {
+                for ev in [1u8, 11, 10, 15] {
+                    a.insert_dtmf(1, ev, 100).unwrap();
+                }
+                sent = true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let stats = b.stats().unwrap();
+        let tones = stats[format!("DTMF{b_tx}")]["tones"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert_eq!(tones, "1#*D", "received {stats}");
+        a.close();
+        b.close();
     }
 
     /// JSEP: createOffer() on an unchanged session re-offers it (LiveKit does this).

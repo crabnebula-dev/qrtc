@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
 use str0m::format::Codec;
-use str0m::media::{Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid};
+use str0m::format::FormatParams;
+use str0m::media::{Frequency, KeyframeRequestKind, MediaKind, MediaTime, Mid, TelephoneEvent};
 use str0m::net::{Protocol, Receive};
 use str0m::stats::PeerStats;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
@@ -323,6 +324,15 @@ pub(crate) struct Driver {
     audio_processing: HashMap<TxId, CaptureProcessing>,
     transform_recv: HashSet<TxId>,
     bwe_desired_set: bool,
+    /// DTMF tones waiting for the next audio write, per sender, with the
+    /// earliest time each may start (RFC 4733: 50 ms after the previous end).
+    dtmf_out: HashMap<TxId, VecDeque<TelephoneEvent>>,
+    dtmf_next_at: HashMap<TxId, Instant>,
+    dtmf_sent: HashMap<TxId, u32>,
+    /// Tones received per transceiver, as characters (not exposed by the W3C
+    /// API; reported in stats for diagnostics).
+    dtmf_in: HashMap<TxId, String>,
+    dtmf_in_last: HashMap<TxId, u64>,
 }
 
 /// Comparable form of an SDP for the "was it munged?" check. Like Chrome and
@@ -393,9 +403,21 @@ impl Driver {
         let relay_only = config.ice_transport_policy.as_deref() == Some("relay");
         // Offer what the page can encode and decode: Opus (engine) and VP8
         // (WebCodecs, always present with WebKitGTK via gst-plugins-good).
-        let rtc = RtcConfig::new()
-            .clear_codecs()
-            .enable_opus(true, false)
+        let mut cfg = RtcConfig::new().clear_codecs().enable_opus(true, false);
+        // DTMF (RFC 4733) as Chrome offers it: at Opus's clock, and at 8 kHz
+        // for gateways to the phone network.
+        for (pt, rate) in [
+            (110u8, Frequency::FORTY_EIGHT_KHZ),
+            (126, Frequency::EIGHT_KHZ),
+        ] {
+            let format = FormatParams {
+                telephone_event_max: Some(15),
+                ..Default::default()
+            };
+            cfg.codec_config()
+                .add_config(pt.into(), None, Codec::Tele, rate, Some(1), format);
+        }
+        let rtc = cfg
             .enable_vp8(true)
             // TWCC bandwidth estimation drives the page's video encoder bitrate.
             .enable_bwe(Some(str0m::bwe::Bitrate::kbps(800)))
@@ -454,6 +476,11 @@ impl Driver {
             audio_processing: HashMap::new(),
             transform_recv: HashSet::new(),
             bwe_desired_set: false,
+            dtmf_out: HashMap::new(),
+            dtmf_next_at: HashMap::new(),
+            dtmf_sent: HashMap::new(),
+            dtmf_in: HashMap::new(),
+            dtmf_in_last: HashMap::new(),
         };
         for s in d.sockets.iter().filter(|_| !relay_only) {
             match Candidate::host(s.local, "udp") {
@@ -661,6 +688,17 @@ impl Driver {
                 if self.audio_senders.contains_key(&tx) {
                     self.audio.add_apm((self.uid << 32) | tx as u64, p);
                 }
+            }
+            Cmd::Dtmf(tx, event, duration_ms) => {
+                self.dtmf_out
+                    .entry(tx)
+                    .or_default()
+                    .push_back(TelephoneEvent {
+                        event,
+                        end: true,
+                        volume: 10,
+                        duration: Duration::from_millis(duration_ms.clamp(40, 6000) as u64),
+                    });
             }
             Cmd::Transform(tx, send, recv) => {
                 if send {
@@ -1179,7 +1217,17 @@ impl Driver {
             }
             TrackKind::Video => MediaTime::new(f.timestamp_us * 9 / 100, Frequency::NINETY_KHZ),
         };
-        if let Err(e) = w.write(pt, Instant::now(), rtp_time, f.data) {
+        let now = Instant::now();
+        let mut w = w;
+        if f.codec == CodecName::Opus && self.dtmf_next_at.get(&f.tx).is_none_or(|t| *t <= now) {
+            if let Some(ev) = self.dtmf_out.get_mut(&f.tx).and_then(|q| q.pop_front()) {
+                self.dtmf_next_at
+                    .insert(f.tx, now + ev.duration + Duration::from_millis(50));
+                *self.dtmf_sent.entry(f.tx).or_default() += 1;
+                w = w.telephone_event(ev);
+            }
+        }
+        if let Err(e) = w.write(pt, now, rtp_time, f.data) {
             log::debug!("write {mid}: {e}");
         }
         if f.codec.kind() == TrackKind::Video && !self.bwe_desired_set {
@@ -1893,6 +1941,23 @@ impl Driver {
                 let Some(tx) = self.tx_by_mid(&mid) else {
                     return;
                 };
+                if d.params.spec().codec == Codec::Tele {
+                    // One tone per event: the end report is sent three times
+                    // (RFC 4733 section 2.5.1.4); the RTP timestamp identifies the event.
+                    let rate = d.params.spec().clock_rate;
+                    let start = d.time.numer();
+                    let ended = TelephoneEvent::parse(&d.data, rate).filter(|e| e.end);
+                    let first_end = ended.is_some() && self.dtmf_in_last.get(&tx) != Some(&start);
+                    if let Some(ev) = ended.filter(|_| first_end) {
+                        self.dtmf_in_last.insert(tx, start);
+                        let c = b"0123456789*#ABCD"
+                            .get(ev.event as usize)
+                            .map(|b| *b as char)
+                            .unwrap_or('?');
+                        self.dtmf_in.entry(tx).or_default().push(c);
+                    }
+                    return;
+                }
                 let Some(codec) = codec_name(d.params.spec().codec) else {
                     return;
                 };
@@ -1990,7 +2055,14 @@ impl Driver {
         for (tx, s) in &self.audio_senders {
             out.insert(
                 format!("AOUT{tx}"),
-                json!({"type": "engine-audio-out", "id": format!("AOUT{tx}"), "tx": tx, "samplesEncoded": s.samples_sent}),
+                json!({"type": "engine-audio-out", "id": format!("AOUT{tx}"), "tx": tx, "samplesEncoded": s.samples_sent,
+                       "dtmfSent": self.dtmf_sent.get(tx).copied().unwrap_or(0)}),
+            );
+        }
+        for (tx, tones) in &self.dtmf_in {
+            out.insert(
+                format!("DTMF{tx}"),
+                json!({"type": "engine-dtmf-in", "id": format!("DTMF{tx}"), "tx": tx, "tones": tones}),
             );
         }
         serde_json::Value::Object(out)

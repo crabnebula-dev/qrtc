@@ -408,6 +408,10 @@ pub trait Peer: Send + Sync {
     /// remote Opus before decode. Video is encoded and decoded in the page, so
     /// only audio needs this.
     fn set_transform(&self, tx: TxId, send: bool, recv: bool) -> Result<()>;
+    /// Send one DTMF tone as RFC 4733 telephone events on an audio sender.
+    /// `event`: 0-9, 10 (*), 11 (#), 12-15 (A-D). Timing between tones is the
+    /// caller's (RTCDTMFSender); the engine keeps RFC 4733's 50 ms gap.
+    fn insert_dtmf(&self, tx: TxId, event: u8, duration_ms: u32) -> Result<()>;
     /// Capture processing for an audio sender, from its track's settings.
     /// Browsers process microphone tracks only; a WebAudio or file track goes
     /// out untouched.
