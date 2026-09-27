@@ -2153,7 +2153,7 @@ mod url_tests {
 
     #[test]
     fn ice_server_urls() {
-        let p = |u: &str| parse_ice_url(u).map(|(t, tr, h, port)| (t, tr, h, port));
+        let p = |u: &str| parse_ice_url(u);
         assert_eq!(
             p("stun:stun.example.org"),
             Some((false, TurnTransport::Udp, "stun.example.org".into(), 3478))

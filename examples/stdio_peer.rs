@@ -5,11 +5,11 @@
 //! `stdio_peer offerer`: creates channel "engine" and an offer, then sends
 //! `hello from engine` once it opens, and echoes like the answerer.
 
+use qrtc::native::NativeEngine;
+use qrtc::*;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::sync::{Arc, Mutex};
-use qrtc::native::NativeEngine;
-use qrtc::*;
 
 fn out(v: Value) {
     let mut o = std::io::stdout().lock();

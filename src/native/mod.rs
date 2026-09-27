@@ -10,9 +10,9 @@ mod audio;
 mod driver;
 mod jsep;
 mod mdns;
+mod net;
 #[cfg(feature = "_pq")]
 pub(crate) mod pq;
-mod net;
 mod stun;
 mod turn;
 mod turn_stream;
@@ -376,7 +376,10 @@ mod tests {
 
     #[cfg(feature = "_pq")]
     fn tls_group(stats: &serde_json::Value) -> Option<String> {
-        stats.as_object()?.values().find(|v| v["type"] == "transport")?["tlsGroup"]
+        stats
+            .as_object()?
+            .values()
+            .find(|v| v["type"] == "transport")?["tlsGroup"]
             .as_str()
             .map(String::from)
     }
@@ -395,23 +398,37 @@ mod tests {
         let t = Duration::from_secs(15);
         let hybrid = "X25519MLKEM768";
 
-        let (a, b) = data_channel_between(&cfg(PqPolicy::Prefer), &cfg(PqPolicy::Prefer), t).expect("prefer/prefer");
+        let (a, b) = data_channel_between(&cfg(PqPolicy::Prefer), &cfg(PqPolicy::Prefer), t)
+            .expect("prefer/prefer");
         assert_eq!(tls_group(&a).as_deref(), Some(hybrid));
         assert_eq!(tls_group(&b).as_deref(), Some(hybrid));
 
-        let (a, b) = data_channel_between(&cfg(PqPolicy::Require), &cfg(PqPolicy::Prefer), t).expect("require/prefer");
+        let (a, b) = data_channel_between(&cfg(PqPolicy::Require), &cfg(PqPolicy::Prefer), t)
+            .expect("require/prefer");
         assert_eq!(tls_group(&a).as_deref(), Some(hybrid));
         assert_eq!(tls_group(&b).as_deref(), Some(hybrid));
 
-        let (a, b) = data_channel_between(&cfg(PqPolicy::Prefer), &cfg(PqPolicy::Off), t).expect("prefer/off");
+        let (a, b) = data_channel_between(&cfg(PqPolicy::Prefer), &cfg(PqPolicy::Off), t)
+            .expect("prefer/off");
         assert_eq!(tls_group(&a), None);
         assert_eq!(tls_group(&b), None);
-        let (a, b) = data_channel_between(&cfg(PqPolicy::Off), &cfg(PqPolicy::Prefer), t).expect("off/prefer");
+        let (a, b) = data_channel_between(&cfg(PqPolicy::Off), &cfg(PqPolicy::Prefer), t)
+            .expect("off/prefer");
         assert_eq!(tls_group(&a), None);
         assert_eq!(tls_group(&b), None);
 
-        assert!(data_channel_between(&cfg(PqPolicy::Require), &cfg(PqPolicy::Off), Duration::from_secs(8)).is_none());
-        assert!(data_channel_between(&cfg(PqPolicy::Off), &cfg(PqPolicy::Require), Duration::from_secs(8)).is_none());
+        assert!(data_channel_between(
+            &cfg(PqPolicy::Require),
+            &cfg(PqPolicy::Off),
+            Duration::from_secs(8)
+        )
+        .is_none());
+        assert!(data_channel_between(
+            &cfg(PqPolicy::Off),
+            &cfg(PqPolicy::Require),
+            Duration::from_secs(8)
+        )
+        .is_none());
     }
 
     /// Codec parameter edits are tolerated (matrix-js-sdk adds usedtx=1) and

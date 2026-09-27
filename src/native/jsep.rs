@@ -210,7 +210,7 @@ fn apply_codec_preferences(
     let dropped = |l: &str| {
         ["a=rtpmap:", "a=fmtp:", "a=rtcp-fb:"].iter().any(|p| {
             l.strip_prefix(p)
-                .and_then(|v| v.split(|c: char| c == ' ').next())
+                .and_then(|v| v.split(' ').next())
                 .is_some_and(|pt| pt != "*" && !ordered.iter().any(|o| o == pt))
         })
     };

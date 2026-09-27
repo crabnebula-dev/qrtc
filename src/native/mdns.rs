@@ -117,14 +117,9 @@ pub(crate) async fn resolve(name: &str, timeout: Duration) -> Option<IpAddr> {
         let _ = sock.send_to(&encode_query(name, 1), dest).await;
         let wait = tokio::time::Instant::now() + Duration::from_millis(250 << attempt);
         let until = wait.min(deadline);
-        loop {
-            match tokio::time::timeout_at(until, sock.recv_from(&mut buf)).await {
-                Ok(Ok((n, _))) => {
-                    if let Some(ip) = parse_answer(&buf[..n], name) {
-                        return Some(ip);
-                    }
-                }
-                _ => break,
+        while let Ok(Ok((n, _))) = tokio::time::timeout_at(until, sock.recv_from(&mut buf)).await {
+            if let Some(ip) = parse_answer(&buf[..n], name) {
+                return Some(ip);
             }
         }
         if tokio::time::Instant::now() >= deadline {

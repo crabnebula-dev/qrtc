@@ -128,7 +128,12 @@ impl PqGroup {
         } else {
             None
         };
-        Ok(ClientKx { group: self, kem_dk, x, share })
+        Ok(ClientKx {
+            group: self,
+            kem_dk,
+            x,
+            share,
+        })
     }
 
     /// Server side: answer a client's key share. Returns the server's key
@@ -161,7 +166,9 @@ pub struct ClientKx {
 
 impl std::fmt::Debug for ClientKx {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ClientKx").field("group", &self.group).finish_non_exhaustive()
+        f.debug_struct("ClientKx")
+            .field("group", &self.group)
+            .finish_non_exhaustive()
     }
 }
 
@@ -253,13 +260,21 @@ impl Kem {
             }
             #[cfg(feature = "pq-moduletto")]
             Kem::MlKem768 => {
-                let (ek, dk) = moduletto::kem::ml_kem_768::keygen_derand(&random32()?, &random32()?);
-                Ok((KemSecret::MlKem768(zeroize::Zeroizing::new(dk.to_vec())), ek.to_vec()))
+                let (ek, dk) =
+                    moduletto::kem::ml_kem_768::keygen_derand(&random32()?, &random32()?);
+                Ok((
+                    KemSecret::MlKem768(zeroize::Zeroizing::new(dk.to_vec())),
+                    ek.to_vec(),
+                ))
             }
             #[cfg(feature = "pq-moduletto")]
             Kem::MlKem512 => {
-                let (ek, dk) = moduletto::kem::ml_kem_512::keygen_derand(&random32()?, &random32()?);
-                Ok((KemSecret::MlKem512(zeroize::Zeroizing::new(dk.to_vec())), ek.to_vec()))
+                let (ek, dk) =
+                    moduletto::kem::ml_kem_512::keygen_derand(&random32()?, &random32()?);
+                Ok((
+                    KemSecret::MlKem512(zeroize::Zeroizing::new(dk.to_vec())),
+                    ek.to_vec(),
+                ))
             }
         }
     }
@@ -339,12 +354,18 @@ mod tests {
         let mut bad = c.share.clone();
         let n = bad.len();
         bad[n - 32..].fill(0);
-        assert!(matches!(g.server_respond(&bad), Err(PqError::NonContributory(_))));
+        assert!(matches!(
+            g.server_respond(&bad),
+            Err(PqError::NonContributory(_))
+        ));
         // A coefficient >= q in the encapsulation key fails the modulus check.
         let mut bad = c.share.clone();
         bad[0] = 0xff;
         bad[1] |= 0x0f;
-        assert!(matches!(g.server_respond(&bad), Err(PqError::InvalidKey(_))));
+        assert!(matches!(
+            g.server_respond(&bad),
+            Err(PqError::InvalidKey(_))
+        ));
     }
 
     /// moduletto and RustCrypto implement the same FIPS 203, so each can
@@ -520,7 +541,9 @@ pub mod tls {
 
     impl SupportedKxGroup for Group {
         fn start(&self) -> Result<Box<dyn ActiveKeyExchange>, rustls::Error> {
-            Ok(Box::new(Active(self.0.client_start().map_err(|e| err(self.0, e))?)))
+            Ok(Box::new(Active(
+                self.0.client_start().map_err(|e| err(self.0, e))?,
+            )))
         }
 
         fn start_and_complete(&self, peer: &[u8]) -> Result<CompletedKeyExchange, rustls::Error> {
@@ -547,7 +570,9 @@ pub mod tls {
     impl ActiveKeyExchange for Active {
         fn complete(self: Box<Self>, peer: &[u8]) -> Result<SharedSecret, rustls::Error> {
             let g = self.0.group();
-            Ok(SharedSecret::from(self.0.complete(peer).map_err(|e| err(g, e))?))
+            Ok(SharedSecret::from(
+                self.0.complete(peer).map_err(|e| err(g, e))?,
+            ))
         }
 
         fn pub_key(&self) -> &[u8] {
@@ -563,10 +588,11 @@ pub mod tls {
     /// or instead of the classical ones (`Require`). The private-codepoint
     /// moduletto group is left out: TURN servers do not know it.
     pub fn with_pq_groups(mut base: CryptoProvider, policy: PqPolicy) -> CryptoProvider {
-        let mut groups: Vec<&'static dyn SupportedKxGroup> = [PqGroup::X25519MlKem768, PqGroup::MlKem768]
-            .into_iter()
-            .map(|g| &*Box::leak(Box::new(Group(g))) as &'static dyn SupportedKxGroup)
-            .collect();
+        let mut groups: Vec<&'static dyn SupportedKxGroup> =
+            [PqGroup::X25519MlKem768, PqGroup::MlKem768]
+                .into_iter()
+                .map(|g| &*Box::leak(Box::new(Group(g))) as &'static dyn SupportedKxGroup)
+                .collect();
         if policy == PqPolicy::Prefer {
             groups.extend(base.kx_groups.iter().copied());
         }

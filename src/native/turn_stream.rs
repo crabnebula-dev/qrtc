@@ -180,7 +180,11 @@ mod tls {
             .connect(name, tcp)
             .await
             .map_err(|e| e.to_string())?;
-        let group = s.get_ref().1.negotiated_key_exchange_group().map(|g| g.name());
+        let group = s
+            .get_ref()
+            .1
+            .negotiated_key_exchange_group()
+            .map(|g| g.name());
         log::debug!("TURN TLS {host}: key exchange {group:?}");
         Ok(s)
     }
@@ -193,7 +197,10 @@ mod tls {
     #[tokio::test]
     #[ignore]
     async fn post_quantum_against_openssl() {
-        let port: u16 = std::env::var("PQ_TLS_PORT").expect("PQ_TLS_PORT").parse().unwrap();
+        let port: u16 = std::env::var("PQ_TLS_PORT")
+            .expect("PQ_TLS_PORT")
+            .parse()
+            .unwrap();
         for (pq, expect) in [
             (PqPolicy::Require, Some("X25519MLKEM768")),
             (PqPolicy::Prefer, Some("X25519MLKEM768")),
@@ -206,7 +213,10 @@ mod tls {
                 .ok()
                 .and_then(|s| s.get_ref().1.negotiated_key_exchange_group())
                 .map(|g| format!("{:?}", g.name()));
-            eprintln!("{pq:?}: {:?}", r.as_ref().err().map(String::as_str).or(group.as_deref()));
+            eprintln!(
+                "{pq:?}: {:?}",
+                r.as_ref().err().map(String::as_str).or(group.as_deref())
+            );
             match expect {
                 Some(g) => assert_eq!(group.as_deref(), Some(g), "{pq:?}"),
                 // The server offers only X25519MLKEM768, so classical fails.
@@ -219,7 +229,11 @@ mod tls {
 #[cfg(not(any(feature = "turn-tls-ring", feature = "turn-tls-rustcrypto")))]
 mod tls {
     use tokio::net::TcpStream;
-    pub(super) async fn connect(_: TcpStream, _: &str, _: crate::PqPolicy) -> Result<TcpStream, String> {
+    pub(super) async fn connect(
+        _: TcpStream,
+        _: &str,
+        _: crate::PqPolicy,
+    ) -> Result<TcpStream, String> {
         Err("built without a TLS provider (feature turn-tls-ring or turn-tls-rustcrypto)".into())
     }
 }
