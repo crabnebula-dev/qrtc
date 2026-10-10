@@ -31,5 +31,16 @@ tests and docs are dropped and their targets removed from the manifest).
 
 6. `Cargo.toml`: `dimpl`, `is` and `str0m-proto` are path dependencies on the
    copies in `vendor/`, so the patched dimpl applies without a `[patch]`
-   section in projects that depend on qrtc. `is` and `str0m-proto` are
-   vendored unmodified apart from the same path wiring.
+   section in projects that depend on qrtc.
+
+7. `str0m-proto` (`src/rng.rs`, `src/id.rs`, `Cargo.toml`) and `is`
+   (`src/stun.rs`, `src/agent.rs`): ICE credentials (`Id::random`, the source
+   of ice-ufrag and ice-pwd), STUN transaction ids and the ICE tie-breaker
+   are drawn from the operating system (`getrandom`) through the new
+   `str0m_proto::CryptographicRng`. Upstream draws them from `fastrand`, a
+   non-cryptographic generator whose thread-local state is seeded from the
+   clock and the thread id on native targets and can be recovered from values
+   it emits in cleartext. RFC 8445 section 5.3 requires unguessable
+   credentials and RFC 8489 section 6 cryptographically random transaction
+   ids. `NonCryptographicRng` stays in use for RTP identifiers. Found in the
+   2026-10-10 security review (`audits/README.md`).

@@ -2,9 +2,9 @@
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
   "version": 1,
-  "serialNumber": "urn:uuid:7f6a6db1-3774-4ef5-8953-2c0d8bba69be",
+  "serialNumber": "urn:uuid:8307aedc-ee27-46aa-913f-19ebecedd5b3",
   "metadata": {
-    "timestamp": "2026-09-27T17:11:54.148086124Z",
+    "timestamp": "2026-10-10T13:32:14.688953000Z",
     "tools": [
       {
         "vendor": "CycloneDX",
@@ -4323,6 +4323,7 @@
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#crc32fast@1.5.2",
         "path+file:///qrtc/vendor/dimpl#0.7.4",
+        "registry+https://github.com/rust-lang/crates.io-index#fastrand@2.5.0",
         "registry+https://github.com/rust-lang/crates.io-index#getrandom@0.3.4",
         "registry+https://github.com/rust-lang/crates.io-index#hmac@0.12.1",
         "registry+https://github.com/rust-lang/crates.io-index#if-addrs@0.13.4",
@@ -4415,6 +4416,7 @@
         "registry+https://github.com/rust-lang/crates.io-index#base64ct@1.8.3",
         "path+file:///qrtc/vendor/dimpl#0.7.4",
         "registry+https://github.com/rust-lang/crates.io-index#fastrand@2.5.0",
+        "registry+https://github.com/rust-lang/crates.io-index#getrandom@0.3.4",
         "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.229",
         "registry+https://github.com/rust-lang/crates.io-index#subtle@2.6.1",
         "registry+https://github.com/rust-lang/crates.io-index#time@0.3.55"

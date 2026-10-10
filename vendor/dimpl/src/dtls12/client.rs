@@ -80,6 +80,11 @@ pub struct Client {
 
     /// Data that is sent before we are connected.
     queued_data: Vec<Buf>,
+
+    /// Patched (tauri-plugin-webrtc): the ClientHello offered DTLS 1.3 (the
+    /// auto-sensing hybrid), so a ServerHello random carrying the RFC 8446
+    /// section 4.1.3 downgrade sentinel means the hello was tampered with.
+    offered_dtls13: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -109,6 +114,7 @@ impl Client {
             last_now: now,
             local_events: VecDeque::new(),
             queued_data: Vec::new(),
+            offered_dtls13: false,
         }
     }
 
@@ -177,6 +183,7 @@ impl Client {
             last_now: now,
             local_events: VecDeque::new(),
             queued_data: Vec::new(),
+            offered_dtls13: true,
         };
         client.handle_timeout(now)?;
         Ok(client)
@@ -467,6 +474,13 @@ impl State {
                 ))
                 .into(),
             );
+        }
+
+        // Patched (tauri-plugin-webrtc): RFC 8446 section 4.1.3. We offered
+        // DTLS 1.3; a 1.3-capable server that still negotiated 1.2 marks its
+        // random, which means our supported_versions were stripped in transit.
+        if client.offered_dtls13 && server_hello.random.has_downgrade_sentinel() {
+            return Err(Error::SecurityError(crate::SecurityError::DowngradeSentinel).into());
         }
 
         // Enforce Null compression only

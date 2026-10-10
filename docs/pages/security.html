@@ -41,6 +41,12 @@
 <h2>Protocol security notes</h2>
 <ul>
   <li>DTLS peers authenticate by certificate fingerprint, carried in the SDP. The signalling channel must protect the SDP; Matrix and LiveKit do so with TLS and, for Matrix, end-to-end encryption.</li>
-  <li>Under <code>prefer</code>, an active attacker on the signalling path could strip post-quantum groups. That attacker can already replace the fingerprint. Use <code>require</code> when both ends are known to support the hybrid.</li>
+  <li>Under <code>prefer</code>, an attacker on the media path can make the auto-sensing handshake fall back to classical DTLS 1.2. The fallback checks the RFC 8446 downgrade sentinel, so a peer that itself speaks DTLS 1.3 and saw a stripped ClientHello fails the handshake rather than connecting classically. Against a peer that only speaks DTLS 1.2 there is no post-quantum key agreement at all. Use <code>require</code> when both ends are known to support the hybrid; <code>tlsGroup</code> in the transport stats reports what was negotiated.</li>
+  <li>Host candidates carry mDNS <code>.local</code> names, not interface addresses. Remote <code>.local</code> names are resolved only when they have the shape browsers generate, at most eight at a time per peer connection.</li>
+  <li>TURN: once the long-term credential is in use, responses without a valid MESSAGE-INTEGRITY are discarded (RFC 8489 section 10.2.3), except the 400, 401 and 438 errors a server sends before authenticating. MESSAGE-INTEGRITY is compared in constant time.</li>
   <li>TURN over TLS checks the server certificate against the platform trust store, with Mozilla's roots as the fallback.</li>
+  <li>Randomness: X25519 keys, ML-KEM seeds, the DTLS certificate key and serial, ICE credentials, STUN transaction ids and the ICE tie-breaker come from the operating system. DTLS hello randoms, cookies and explicit nonces come from <code>rand</code>'s thread-local ChaCha generator, seeded from the OS. RTP identifiers (SSRC, sequence numbers, VP8 PictureID) use str0m's fast generator, reseeded from the OS on every engine thread. Key material is zeroized when dropped; ICE passwords are redacted from trace logs.</li>
 </ul>
+
+<h2>Security reviews</h2>
+<p>Reviews and their findings are recorded under <a href="https://github.com/crabnebula-dev/qrtc/blob/main/audits/README.md">audits/</a>. The 2026-10-10 review covered the engine, the vendored patches, randomness, the build and release pipeline; its findings are fixed in the same change set, with one accepted risk (moduletto is a git dependency on a branch). <a href="https://github.com/crabnebula-dev/qrtc/blob/main/SECURITY.md">SECURITY.md</a> has the reporting process.</p>

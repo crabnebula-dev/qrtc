@@ -61,6 +61,11 @@ pub struct Server {
     /// Cookie secret for HMAC, generated per-server instance
     cookie_secret: [u8; 32],
 
+    /// Patched (tauri-plugin-webrtc): this server also speaks DTLS 1.3 (the
+    /// auto-sensing server fell back to 1.2), so its ServerHello random
+    /// carries the RFC 8446 section 4.1.3 downgrade sentinel.
+    downgrade_sentinel: bool,
+
     /// Storage for extension data
     extension_data: Buf,
 
@@ -165,6 +170,7 @@ impl Server {
             random: None,
             session_id: None,
             cookie_secret,
+            downgrade_sentinel: false,
             extension_data: Buf::new(),
             negotiated_srtp_profile: None,
             client_supported_groups: None,
@@ -182,6 +188,15 @@ impl Server {
 
     pub fn into_client(self) -> Client {
         Client::new_with_engine(self.engine, self.last_now)
+    }
+
+    /// Patched (tauri-plugin-webrtc): mark this 1.2 server as a fallback of
+    /// a DTLS 1.3-capable one. Call before the first `handle_timeout`.
+    pub(crate) fn mark_dtls13_capable(&mut self) {
+        self.downgrade_sentinel = true;
+        if let Some(r) = &mut self.random {
+            r.set_downgrade_sentinel_12();
+        }
     }
 
     pub(crate) fn state_name(&self) -> &'static str {
@@ -219,7 +234,12 @@ impl Server {
     pub fn handle_timeout(&mut self, now: Instant) -> Result<(), Error> {
         self.last_now = now;
         if self.random.is_none() {
-            self.random = Some(Random::new_with_time(now, &mut self.engine.rng));
+            let mut random = Random::new_with_time(now, &mut self.engine.rng);
+            if self.downgrade_sentinel {
+                // Patched (tauri-plugin-webrtc): RFC 8446 section 4.1.3.
+                random.set_downgrade_sentinel_12();
+            }
+            self.random = Some(random);
         }
         self.engine.handle_timeout(now)?;
         match self.make_progress() {

@@ -43,7 +43,7 @@
 
 <h2>Sockets and candidates</h2>
 <p>The engine binds one UDP socket per usable interface address, and each becomes a host candidate. Loopback is used only when nothing else exists, as in an isolated CI container. Server-reflexive candidates come from STUN Binding requests on those sockets. Relayed candidates come from TURN allocations over UDP, or over a stream to the TURN server when the URL asks for TCP or TLS.</p>
-<p>Remote <code>.local</code> host candidates, which browsers use to hide local addresses, are resolved with a one-shot mDNS query on 224.0.0.251:5353 before they reach the ICE agent.</p>
+<p>Host candidates leave the engine with a random <code>&lt;uuid&gt;.local</code> name in place of the address, as browsers do, so the page, the signalling server and a remote peer that never connects do not learn the interface addresses. One mDNS responder per engine listens on 224.0.0.251:5353 and ff02::fb:5353 and answers A/AAAA queries for the names of live peer connections, at most one multicast answer per name per second. Remote <code>.local</code> candidates are resolved with a multicast query before they reach the ICE agent; a name registered by this engine resolves without the network. If no mDNS socket can be opened, host candidates carry plain addresses and a warning is logged.</p>
 
 <h2>The JSEP layer</h2>
 <p>str0m generates the SDP. qrtc rewrites only what W3C semantics decide and str0m cannot know:</p>
@@ -67,7 +67,7 @@
     <tr><td><code>native/audio.rs</code></td><td>Opus, audio processing, jitter buffers, playout clock</td></tr>
     <tr><td><code>native/net.rs</code></td><td>Interface discovery and host sockets</td></tr>
     <tr><td><code>native/stun.rs</code>, <code>turn.rs</code>, <code>turn_stream.rs</code></td><td>STUN/TURN codec, TURN client state machine, TCP and TLS transports</td></tr>
-    <tr><td><code>native/mdns.rs</code></td><td>mDNS resolver for <code>.local</code> candidates</td></tr>
+    <tr><td><code>native/mdns.rs</code></td><td>mDNS responder for our host candidate names and resolver for remote <code>.local</code> candidates</td></tr>
     <tr><td><code>native/pq.rs</code></td><td>Post-quantum and hybrid key exchange groups</td></tr>
   </tbody>
 </table></div>

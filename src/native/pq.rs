@@ -22,6 +22,10 @@
 
 use std::cell::Cell;
 use x25519_dalek::{PublicKey, StaticSecret};
+use zeroize::Zeroizing;
+
+/// A shared secret or seed, wiped when dropped.
+pub type Secret = Zeroizing<Vec<u8>>;
 
 thread_local! {
     /// The post-quantum group of the last DTLS key exchange on this thread.
@@ -122,7 +126,7 @@ impl PqGroup {
     pub fn client_start(self) -> Result<ClientKx, PqError> {
         let (kem_dk, mut share) = self.kem().keypair()?;
         let x = if self.hybrid() {
-            let sk = StaticSecret::from(random32()?);
+            let sk = StaticSecret::from(*random32()?);
             share.extend_from_slice(PublicKey::from(&sk).as_bytes());
             Some(sk)
         } else {
@@ -138,7 +142,7 @@ impl PqGroup {
 
     /// Server side: answer a client's key share. Returns the server's key
     /// share and the shared secret.
-    pub fn server_respond(self, client_share: &[u8]) -> Result<(Vec<u8>, Vec<u8>), PqError> {
+    pub fn server_respond(self, client_share: &[u8]) -> Result<(Vec<u8>, Secret), PqError> {
         let kem = self.kem();
         let x_len = if self.hybrid() { X25519_LEN } else { 0 };
         if client_share.len() != kem.ek_len() + x_len {
@@ -147,9 +151,9 @@ impl PqGroup {
         let (ek, x_peer) = client_share.split_at(kem.ek_len());
         let (mut share, mut secret) = kem.encapsulate(ek, self.name())?;
         if self.hybrid() {
-            let sk = StaticSecret::from(random32()?);
+            let sk = StaticSecret::from(*random32()?);
             share.extend_from_slice(PublicKey::from(&sk).as_bytes());
-            secret.extend_from_slice(&x25519(&sk, x_peer, self.name())?);
+            secret.extend_from_slice(&*x25519(&sk, x_peer, self.name())?);
         }
         Ok((share, secret))
     }
@@ -178,7 +182,7 @@ impl ClientKx {
     }
 
     /// Combine with the server's key share into the shared secret.
-    pub fn complete(self, server_share: &[u8]) -> Result<Vec<u8>, PqError> {
+    pub fn complete(self, server_share: &[u8]) -> Result<Secret, PqError> {
         let name = self.group.name();
         let kem = self.group.kem();
         let x_len = if self.x.is_some() { X25519_LEN } else { 0 };
@@ -188,24 +192,32 @@ impl ClientKx {
         let (ct, x_peer) = server_share.split_at(kem.ct_len());
         let mut secret = self.kem_dk.decapsulate(ct, name)?;
         if let Some(sk) = &self.x {
-            secret.extend_from_slice(&x25519(sk, x_peer, name)?);
+            secret.extend_from_slice(&*x25519(sk, x_peer, name)?);
         }
         Ok(secret)
     }
 }
 
-fn x25519(sk: &StaticSecret, peer: &[u8], name: &'static str) -> Result<[u8; 32], PqError> {
+/// X25519 shared secret. `sk` is clamped inside `diffie_hellman`; the
+/// all-zero output of a low-order peer point is rejected.
+fn x25519(
+    sk: &StaticSecret,
+    peer: &[u8],
+    name: &'static str,
+) -> Result<Zeroizing<[u8; 32]>, PqError> {
     let peer: [u8; 32] = peer.try_into().map_err(|_| PqError::Length(name))?;
     let ss = sk.diffie_hellman(&PublicKey::from(peer));
     if !ss.was_contributory() {
         return Err(PqError::NonContributory(name));
     }
-    Ok(ss.to_bytes())
+    Ok(Zeroizing::new(ss.to_bytes()))
 }
 
-fn random32() -> Result<[u8; 32], PqError> {
-    let mut b = [0u8; 32];
-    getrandom::fill(&mut b).map_err(|e| PqError::Rng(e.to_string()))?;
+/// 32 bytes from the operating system's random number generator: X25519
+/// private keys and the ML-KEM seeds (`d`, `z`, `m` of FIPS 203).
+fn random32() -> Result<Zeroizing<[u8; 32]>, PqError> {
+    let mut b = Zeroizing::new([0u8; 32]);
+    getrandom::fill(&mut *b).map_err(|e| PqError::Rng(e.to_string()))?;
     Ok(b)
 }
 
@@ -253,6 +265,7 @@ impl Kem {
         match self {
             #[cfg(not(feature = "pq-moduletto"))]
             Kem::MlKem768 => {
+                // ml-kem's `getrandom` feature: seeds from the OS.
                 use ml_kem::kem::Kem as _;
                 use ml_kem::KeyExport;
                 let (dk, ek) = ml_kem::MlKem768::generate_keypair();
@@ -261,18 +274,18 @@ impl Kem {
             #[cfg(feature = "pq-moduletto")]
             Kem::MlKem768 => {
                 let (ek, dk) =
-                    moduletto::kem::ml_kem_768::keygen_derand(&random32()?, &random32()?);
+                    moduletto::kem::ml_kem_768::keygen_derand(&*random32()?, &*random32()?);
                 Ok((
-                    KemSecret::MlKem768(zeroize::Zeroizing::new(dk.to_vec())),
+                    KemSecret::MlKem768(Zeroizing::new(dk.to_vec())),
                     ek.to_vec(),
                 ))
             }
             #[cfg(feature = "pq-moduletto")]
             Kem::MlKem512 => {
                 let (ek, dk) =
-                    moduletto::kem::ml_kem_512::keygen_derand(&random32()?, &random32()?);
+                    moduletto::kem::ml_kem_512::keygen_derand(&*random32()?, &*random32()?);
                 Ok((
-                    KemSecret::MlKem512(zeroize::Zeroizing::new(dk.to_vec())),
+                    KemSecret::MlKem512(Zeroizing::new(dk.to_vec())),
                     ek.to_vec(),
                 ))
             }
@@ -280,7 +293,7 @@ impl Kem {
     }
 
     /// Encapsulate to a peer's key, after the FIPS 203 encapsulation key check.
-    fn encapsulate(self, ek: &[u8], name: &'static str) -> Result<(Vec<u8>, Vec<u8>), PqError> {
+    fn encapsulate(self, ek: &[u8], name: &'static str) -> Result<(Vec<u8>, Secret), PqError> {
         match self {
             #[cfg(not(feature = "pq-moduletto"))]
             Kem::MlKem768 => {
@@ -289,41 +302,41 @@ impl Kem {
                 let ek = ml_kem::EncapsulationKey::<ml_kem::MlKem768>::new_from_slice(ek)
                     .map_err(|_| PqError::InvalidKey(name))?;
                 let (ct, ss) = ek.encapsulate();
-                Ok((ct.to_vec(), ss.to_vec()))
+                Ok((ct.to_vec(), Zeroizing::new(ss.to_vec())))
             }
             #[cfg(feature = "pq-moduletto")]
             Kem::MlKem768 => {
-                let (ct, ss) = moduletto::kem::ml_kem_768::encaps_derand(ek, &random32()?)
+                let (ct, ss) = moduletto::kem::ml_kem_768::encaps_derand(ek, &*random32()?)
                     .map_err(|_| PqError::InvalidKey(name))?;
-                Ok((ct.to_vec(), ss.to_vec()))
+                Ok((ct.to_vec(), Zeroizing::new(ss.to_vec())))
             }
             #[cfg(feature = "pq-moduletto")]
             Kem::MlKem512 => {
-                let (ct, ss) = moduletto::kem::ml_kem_512::encaps_derand(ek, &random32()?)
+                let (ct, ss) = moduletto::kem::ml_kem_512::encaps_derand(ek, &*random32()?)
                     .map_err(|_| PqError::InvalidKey(name))?;
-                Ok((ct.to_vec(), ss.to_vec()))
+                Ok((ct.to_vec(), Zeroizing::new(ss.to_vec())))
             }
         }
     }
 }
 
 impl KemSecret {
-    fn decapsulate(&self, ct: &[u8], name: &'static str) -> Result<Vec<u8>, PqError> {
+    fn decapsulate(&self, ct: &[u8], name: &'static str) -> Result<Secret, PqError> {
         match self {
             #[cfg(not(feature = "pq-moduletto"))]
             KemSecret::MlKem768(dk) => {
                 use ml_kem::kem::Decapsulate;
                 let ct: ml_kem::Ciphertext<ml_kem::MlKem768> =
                     ct.try_into().map_err(|_| PqError::Length(name))?;
-                Ok(dk.decapsulate(&ct).to_vec())
+                Ok(Zeroizing::new(dk.decapsulate(&ct).to_vec()))
             }
             #[cfg(feature = "pq-moduletto")]
             KemSecret::MlKem768(dk) => moduletto::kem::ml_kem_768::decaps(dk, ct)
-                .map(|ss| ss.to_vec())
+                .map(|ss| Zeroizing::new(ss.to_vec()))
                 .map_err(|_| PqError::Length(name)),
             #[cfg(feature = "pq-moduletto")]
             KemSecret::MlKem512(dk) => moduletto::kem::ml_kem_512::decaps(dk, ct)
-                .map(|ss| ss.to_vec())
+                .map(|ss| Zeroizing::new(ss.to_vec()))
                 .map_err(|_| PqError::Length(name)),
         }
     }
@@ -339,7 +352,7 @@ mod tests {
             let c = g.client_start().unwrap();
             let (share, s_secret) = g.server_respond(&c.share).unwrap();
             let c_secret = c.complete(&share).unwrap();
-            assert_eq!(c_secret, s_secret, "{}", g.name());
+            assert_eq!(*c_secret, *s_secret, "{}", g.name());
             assert_eq!(c_secret.len(), if g.hybrid() { 64 } else { 32 });
             assert_eq!(PqGroup::from_codepoint(g.codepoint()), Some(g));
         }
@@ -380,11 +393,11 @@ mod tests {
             ($rc:ty, $m:ident) => {{
                 // RustCrypto key pair, moduletto encapsulates.
                 let (dk, ek) = <$rc>::generate_keypair();
-                let (ct, ss) = $m::encaps_derand(&ek.to_bytes(), &random32().unwrap()).unwrap();
+                let (ct, ss) = $m::encaps_derand(&ek.to_bytes(), &*random32().unwrap()).unwrap();
                 let ct: ml_kem::Ciphertext<$rc> = ct.as_slice().try_into().unwrap();
                 assert_eq!(dk.decapsulate(&ct).as_slice(), ss.as_slice());
                 // moduletto key pair, RustCrypto encapsulates.
-                let (ek, dk) = $m::keygen_derand(&random32().unwrap(), &random32().unwrap());
+                let (ek, dk) = $m::keygen_derand(&*random32().unwrap(), &*random32().unwrap());
                 let ek = ml_kem::EncapsulationKey::<$rc>::new_from_slice(&ek).unwrap();
                 let (ct, ss) = ek.encapsulate();
                 assert_eq!($m::decaps(&dk, &ct).unwrap().as_slice(), ss.as_slice());
@@ -548,10 +561,11 @@ pub mod tls {
 
         fn start_and_complete(&self, peer: &[u8]) -> Result<CompletedKeyExchange, rustls::Error> {
             let (pub_key, secret) = self.0.server_respond(peer).map_err(|e| err(self.0, e))?;
+            // `SharedSecret` zeroizes on drop; `secret` is wiped when it goes out of scope.
             Ok(CompletedKeyExchange {
                 group: self.name(),
                 pub_key,
-                secret: SharedSecret::from(secret),
+                secret: SharedSecret::from(&secret[..]),
             })
         }
 
@@ -570,9 +584,8 @@ pub mod tls {
     impl ActiveKeyExchange for Active {
         fn complete(self: Box<Self>, peer: &[u8]) -> Result<SharedSecret, rustls::Error> {
             let g = self.0.group();
-            Ok(SharedSecret::from(
-                self.0.complete(peer).map_err(|e| err(g, e))?,
-            ))
+            let secret = self.0.complete(peer).map_err(|e| err(g, e))?;
+            Ok(SharedSecret::from(&secret[..]))
         }
 
         fn pub_key(&self) -> &[u8] {

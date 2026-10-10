@@ -11,7 +11,7 @@ use super::{ChannelShared, Cmd, Shared};
 use crate::*;
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
 use str0m::channel::{ChannelConfig, ChannelId, Reliability};
@@ -23,8 +23,13 @@ use str0m::stats::PeerStats;
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 use tokio::sync::mpsc;
 
+/// Remote mDNS names resolved at once per peer connection. Each resolution
+/// holds a multicast socket for up to 3 s; the cap keeps a peer that floods
+/// `.local` candidates from exhausting file descriptors.
+const MDNS_MAX_IN_FLIGHT: usize = 8;
+
 /// A STUN or TURN server after DNS resolution.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) enum IceServerAddr {
     Stun(SocketAddr),
     Turn {
@@ -33,6 +38,90 @@ pub(crate) enum IceServerAddr {
         password: String,
         transport: TurnTransport,
     },
+}
+
+/// The TURN credential is left out of debug output.
+impl std::fmt::Debug for IceServerAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IceServerAddr::Stun(a) => f.debug_tuple("Stun").field(a).finish(),
+            IceServerAddr::Turn {
+                addr,
+                username,
+                transport,
+                ..
+            } => f
+                .debug_struct("Turn")
+                .field("addr", addr)
+                .field("username", username)
+                .field("password", &"[redacted]")
+                .field("transport", transport)
+                .finish(),
+        }
+    }
+}
+
+/// A local candidate as the page and the remote peer see it: a host address
+/// in `names` is replaced by its mDNS name, as browsers do (the remote
+/// resolves it when it connects; the signalling path never sees the
+/// address). A related address of ours is blanked too; str0m already
+/// writes an unspecified one. Works on `candidate:...` and `a=candidate:...`.
+fn public_candidate(names: &HashMap<IpAddr, String>, s: &str) -> String {
+    if names.is_empty() {
+        return s.to_string();
+    }
+    let mut fields: Vec<String> = s.split_whitespace().map(str::to_string).collect();
+    if let Some(ip) = fields.get(4).and_then(|f| f.parse::<IpAddr>().ok()) {
+        if let Some(name) = names.get(&ip) {
+            fields[4] = name.clone();
+        }
+    }
+    if let Some(i) = fields.iter().position(|f| f == "raddr") {
+        if let Some(ip) = fields.get(i + 1).and_then(|f| f.parse::<IpAddr>().ok()) {
+            if names.contains_key(&ip) {
+                fields[i + 1] = if ip.is_ipv4() { "0.0.0.0" } else { "::" }.to_string();
+                if fields.get(i + 2).map(String::as_str) == Some("rport") && fields.len() > i + 3 {
+                    fields[i + 3] = "0".to_string();
+                }
+            }
+        }
+    }
+    fields.join(" ")
+}
+
+/// `a=candidate:` lines of a local SDP through [`public_candidate`].
+fn public_sdp(names: &HashMap<IpAddr, String>, sdp: &str) -> String {
+    if names.is_empty() {
+        return sdp.to_string();
+    }
+    let mut out = String::with_capacity(sdp.len());
+    for line in sdp.split_inclusive("\r\n") {
+        let (body, nl) = match line.strip_suffix("\r\n") {
+            Some(b) => (b, "\r\n"),
+            None => (line, ""),
+        };
+        if body.starts_with("a=candidate:") {
+            out.push_str(&public_candidate(names, body));
+        } else {
+            out.push_str(body);
+        }
+        out.push_str(nl);
+    }
+    out
+}
+
+/// An SDP for the log: ICE passwords replaced.
+fn redact_sdp(sdp: &str) -> String {
+    sdp.lines()
+        .map(|l| {
+            if l.starts_with("a=ice-pwd:") {
+                "a=ice-pwd:[redacted]"
+            } else {
+                l
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Results of background work (DNS, mDNS) delivered back to the driver.
@@ -289,6 +378,10 @@ pub(crate) struct Driver {
     shared: Arc<Shared>,
     sockets: Vec<HostSocket>,
     host_candidates: Vec<Candidate>,
+    /// mDNS responder of the engine, and the names it serves for our host
+    /// addresses. Empty when the responder could not start.
+    mdns: Arc<super::mdns::Responder>,
+    host_names: HashMap<IpAddr, String>,
     sig: Sig,
     created_offer: Option<(String, SdpPendingOffer)>,
     local_offer: Option<(String, SdpPendingOffer)>,
@@ -317,6 +410,8 @@ pub(crate) struct Driver {
     /// str0m's answer to `pending_remote`, before our rewrite.
     raw_answer: Option<String>,
     buffered_candidates: Vec<String>,
+    /// Permits for in-flight mDNS resolutions (see [`MDNS_MAX_IN_FLIGHT`]).
+    mdns_permits: Arc<tokio::sync::Semaphore>,
     ice_restart: bool,
     audio: Arc<AudioHub>,
     uid: u64,
@@ -401,6 +496,7 @@ impl Driver {
         events: EventSink,
         shared: Arc<Shared>,
         audio: Arc<AudioHub>,
+        mdns: Arc<super::mdns::Responder>,
         uid: u64,
     ) -> Result<Self> {
         let now = Instant::now();
@@ -473,6 +569,21 @@ impl Driver {
         if sockets.is_empty() {
             return Err(Error::Operation("no usable network interface".into()));
         }
+        // Host candidates travel as mDNS names (browsers do the same), so
+        // the page, the signalling server and a remote peer that never
+        // connects do not learn our interface addresses. Loopback stays as is.
+        let mut host_names = HashMap::new();
+        if !relay_only {
+            for s in &sockets {
+                let ip = s.local.ip();
+                if ip.is_loopback() || host_names.contains_key(&ip) {
+                    continue;
+                }
+                if let Some(name) = mdns.register(ip) {
+                    host_names.insert(ip, name);
+                }
+            }
+        }
         let (aux_tx, aux_rx) = mpsc::unbounded_channel();
         let mut d = Driver {
             aux_tx,
@@ -492,6 +603,8 @@ impl Driver {
             shared,
             sockets,
             host_candidates: Vec::new(),
+            mdns,
+            host_names,
             sig: Sig::Stable,
             created_offer: None,
             local_offer: None,
@@ -515,6 +628,7 @@ impl Driver {
             pending_remote: None,
             raw_answer: None,
             buffered_candidates: Vec::new(),
+            mdns_permits: Arc::new(tokio::sync::Semaphore::new(MDNS_MAX_IN_FLIGHT)),
             ice_restart: false,
             audio,
             uid,
@@ -606,6 +720,9 @@ impl Driver {
         let _ = now;
         for r in readers {
             r.abort();
+        }
+        for name in self.host_names.values() {
+            self.mdns.unregister(name);
         }
         self.audio.remove_pc(self.uid);
         log::debug!("peer connection driver stopped");
@@ -826,7 +943,7 @@ impl Driver {
 
     /// Rewrite direction and msid of outgoing SDP from the transceiver model.
     fn munge(&self, raw: &str, answer: bool) -> String {
-        jsep::rewrite(raw, |mid| {
+        let sdp = jsep::rewrite(raw, |mid| {
             let t = self
                 .txs
                 .values()
@@ -850,7 +967,8 @@ impl Driver {
                 msid,
                 codecs: t.spec.codec_preferences.clone(),
             })
-        })
+        });
+        public_sdp(&self.host_names, &sdp)
     }
 
     fn create_offer(&mut self) -> Result<SessionDescription> {
@@ -1005,7 +1123,7 @@ impl Driver {
     }
 
     fn set_local(&mut self, d: SessionDescription) -> Result<Vec<TransceiverState>> {
-        log::trace!("local {:?}:\n{}", d.kind, d.sdp);
+        log::trace!("local {:?}:\n{}", d.kind, redact_sdp(&d.sdp));
         match d.kind {
             SdpType::Offer => {
                 if self.sig != Sig::Stable {
@@ -1084,7 +1202,7 @@ impl Driver {
     }
 
     fn set_remote(&mut self, d: SessionDescription) -> Result<Vec<TransceiverState>> {
-        log::trace!("remote {:?}:\n{}", d.kind, d.sdp);
+        log::trace!("remote {:?}:\n{}", d.kind, redact_sdp(&d.sdp));
         match d.kind {
             SdpType::Offer => {
                 match self.sig {
@@ -1361,11 +1479,31 @@ impl Driver {
             return Ok(());
         }
         let fields: Vec<&str> = s.split_whitespace().collect();
-        if let Some(host) = fields.get(4).filter(|a| a.ends_with(".local")) {
+        if let Some(host) = fields
+            .get(4)
+            .filter(|a| a.trim_end_matches('.').ends_with(".local"))
+        {
             // mDNS-obfuscated host candidate: resolve in the background. Until
             // then connectivity can still form through peer-reflexive candidates.
-            let (host, cand, tx) = (host.to_string(), s.to_string(), self.aux_tx.clone());
+            // Only browser-shaped names are resolved, and only a few at a time;
+            // like a browser, a name that does not resolve is simply unusable.
+            if !super::mdns::is_candidate_name(host) {
+                log::debug!("remote candidate with an invalid mDNS name ignored");
+                return Ok(());
+            }
+            let (host, cand) = (host.to_string(), s.to_string());
+            if let Some(ip) = self.mdns.lookup(&host) {
+                // A name this engine registered: a peer in the same process.
+                self.add_remote_candidate_str(&cand.replacen(&host, &ip.to_string(), 1));
+                return Ok(());
+            }
+            let Ok(permit) = self.mdns_permits.clone().try_acquire_owned() else {
+                log::debug!("mDNS {host}: too many resolutions in flight, candidate ignored");
+                return Ok(());
+            };
+            let tx = self.aux_tx.clone();
             tokio::spawn(async move {
+                let _permit = permit;
                 match super::mdns::resolve(&host, Duration::from_secs(3)).await {
                     Some(ip) => {
                         log::debug!("mDNS {host} -> {ip}");
@@ -1525,7 +1663,7 @@ impl Driver {
     fn emit_candidate(&self, c: &Candidate, mid: Option<String>) {
         self.emit(PeerEvent::IceCandidate {
             candidate: Some(IceCandidate {
-                candidate: c.to_sdp_string(),
+                candidate: public_candidate(&self.host_names, &c.to_sdp_string()),
                 sdp_mid: mid,
                 sdp_m_line_index: Some(0),
             }),
@@ -2107,7 +2245,13 @@ impl Driver {
                            "currentRoundTripTime": s.rtt.map(|d| d.as_secs_f64()),
                            "localCandidateId": "LC", "remoteCandidateId": "RC", "protocol": format!("{:?}", p.protocol).to_lowercase()}),
                 );
-                out.insert("LC".into(), json!({"type": "local-candidate", "id": "LC", "address": p.local.addr.ip().to_string(), "port": p.local.addr.port()}));
+                // The local address is reported as its mDNS name when it has one.
+                let local = self
+                    .host_names
+                    .get(&p.local.addr.ip())
+                    .cloned()
+                    .unwrap_or_else(|| p.local.addr.ip().to_string());
+                out.insert("LC".into(), json!({"type": "local-candidate", "id": "LC", "address": local, "port": p.local.addr.port()}));
                 out.insert("RC".into(), json!({"type": "remote-candidate", "id": "RC", "address": p.remote.addr.ip().to_string(), "port": p.remote.addr.port()}));
             }
         }
@@ -2144,6 +2288,55 @@ impl Driver {
             );
         }
         serde_json::Value::Object(out)
+    }
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::*;
+
+    #[test]
+    fn host_addresses_become_names() {
+        let mut names = HashMap::new();
+        names.insert(
+            "192.168.1.7".parse::<IpAddr>().unwrap(),
+            "abc.local".to_string(),
+        );
+        names.insert(
+            "fd00::7".parse::<IpAddr>().unwrap(),
+            "def.local".to_string(),
+        );
+        let host = "candidate:1 1 udp 2130706431 192.168.1.7 5000 typ host ufrag xyz";
+        assert_eq!(
+            public_candidate(&names, host),
+            "candidate:1 1 udp 2130706431 abc.local 5000 typ host ufrag xyz"
+        );
+        let v6 = "a=candidate:2 1 udp 2130706431 fd00::7 5001 typ host";
+        assert_eq!(
+            public_candidate(&names, v6),
+            "a=candidate:2 1 udp 2130706431 def.local 5001 typ host"
+        );
+        // A related address of ours is blanked; a public one is kept.
+        let srflx =
+            "candidate:3 1 udp 1694498815 203.0.113.9 6000 typ srflx raddr 192.168.1.7 rport 5000";
+        assert_eq!(
+            public_candidate(&names, srflx),
+            "candidate:3 1 udp 1694498815 203.0.113.9 6000 typ srflx raddr 0.0.0.0 rport 0"
+        );
+        let relay =
+            "candidate:4 1 udp 16777215 198.51.100.4 7000 typ relay raddr 203.0.113.9 rport 6000";
+        assert_eq!(public_candidate(&names, relay), relay);
+        // Unknown addresses and an empty map pass through.
+        let other = "candidate:5 1 udp 2130706431 10.0.0.1 5000 typ host";
+        assert_eq!(public_candidate(&names, other), other);
+        assert_eq!(public_candidate(&HashMap::new(), host), host);
+        let sdp = format!("v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na={host}\r\na=mid:0\r\n");
+        let out = public_sdp(&names, &sdp);
+        assert!(
+            out.contains("a=candidate:1 1 udp 2130706431 abc.local 5000 typ host ufrag xyz\r\n")
+        );
+        assert!(!out.contains("192.168.1.7"));
+        assert!(out.ends_with("a=mid:0\r\n"));
     }
 }
 

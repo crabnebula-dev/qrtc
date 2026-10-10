@@ -1,0 +1,17 @@
+# Update pull requests for the pinned GitHub Actions, the Cargo dependencies
+# and the Node dependencies of the interop tests. Vendored crates under
+# vendor/ are path dependencies and are updated by hand (see PATCHES.md).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /tests
+    schedule:
+      interval: weekly

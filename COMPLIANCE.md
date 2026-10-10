@@ -39,6 +39,7 @@ Article 64(10)(b) excludes administrative fines against open-source software ste
 - Releases are built from signed tags. Each carries the source archive, the SBOM and SHA-256 sums, with build provenance attestations (`.github/workflows/release.yml`).
 - Browser, SFU, Matrix and TURN server interoperability is tested in tauri-plugin-webrtc before each release of the plugin.
 - Patches to vendored crates are listed in each crate's `PATCHES.md` and are proposed upstream.
+- Security reviews and their findings, including accepted risks, are recorded under `audits/`. `SECURITY.md` carries the reporting process.
 - The engine uses no `unsafe` code of its own. With `turn-tls-rustcrypto` it compiles no C code; its only `-sys` crates bind platform APIs (the Windows and Apple certificate stores). Dependencies are kept minimal. Known-vulnerable dependencies are removed or updated when advisories are published.
 
 **Vulnerability handling.**
@@ -62,7 +63,8 @@ A manufacturer that integrates qrtc into a product it places on the market must 
 | Validation | Not validated under FIPS 140-3 (CMVP) or any other certification scheme |
 | Third-party material | str0m, str0m-proto, is, str0m-rust-crypto and dimpl, vendored with the patches listed in `vendor/*/PATCHES.md` |
 | SBOM | `sbom/qrtc.cdx.json`, CycloneDX 1.5, default build; attached to each release |
-| Vulnerability reports | GitHub private vulnerability reporting on this repository |
+| Vulnerability reports | GitHub private vulnerability reporting on this repository; see `SECURITY.md` |
+| Security reviews | `audits/README.md`: findings, fixes and accepted risks |
 
 ## What would change this
 

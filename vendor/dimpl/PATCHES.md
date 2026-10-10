@@ -51,3 +51,15 @@ nothing for classical groups. Every changed spot is marked
 The patched crate passes its own unit tests (251 with `rust-crypto`, 301 with
 the default features), run from a copy with the upstream dev-dependencies
 restored.
+
+7. **Downgrade sentinel** (`src/types.rs`, `src/error.rs`, `src/dtls12/client.rs`,
+   `src/dtls12/server.rs`, `src/lib.rs`). RFC 8446 section 4.1.3, applied to
+   DTLS. The auto-sensing client offers DTLS 1.3; if a DTLS 1.2 ServerHello
+   then arrives whose random ends in `DOWNGRD\x01` (or `DOWNGRD\x00`), a
+   1.3-capable server saw a ClientHello without 1.3, so the hello was
+   tampered with and the handshake fails with
+   `SecurityError::DowngradeSentinel`. The auto-sensing server sets the
+   sentinel when it falls back to DTLS 1.2 for a client that did not offer
+   1.3. A client configured for DTLS 1.2 only does not check, and a server
+   configured for 1.2 only does not set it. Found in the 2026-10-10 security
+   review (`audits/README.md`).

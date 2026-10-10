@@ -782,6 +782,10 @@ impl Dtls {
         } else {
             Server12::new(config, cert, now)
         };
+        // Patched (tauri-plugin-webrtc): this server speaks DTLS 1.3 and is
+        // negotiating 1.2 only because the client did not offer 1.3, so its
+        // random carries the RFC 8446 section 4.1.3 downgrade sentinel.
+        server12.mark_dtls13_capable();
         server12.handle_timeout(now)?;
 
         self.inner = Some(Inner::Server12(server12));
