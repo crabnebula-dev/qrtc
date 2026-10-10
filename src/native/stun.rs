@@ -192,7 +192,11 @@ impl Message {
                 let mut copy = buf[..p].to_vec();
                 let len = (p - 20 + 24) as u16;
                 copy[2..4].copy_from_slice(&len.to_be_bytes());
-                return hmac_sha1(key, &copy) == expected;
+                // Constant-time comparison.
+                let mut mac =
+                    <Hmac<Sha1> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+                mac.update(&copy);
+                return mac.verify_slice(expected).is_ok();
             }
             p += 4 + l.div_ceil(4) * 4;
         }

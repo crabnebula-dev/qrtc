@@ -186,17 +186,32 @@ impl TurnClient {
             }
             return (ev, out);
         }
+        if !self.txns.contains_key(&msg.tid) {
+            return (ev, out);
+        }
+        let cls = class(msg.typ);
+        if !matches!(cls, Class::Success | Class::Error) {
+            return (ev, out);
+        }
+        // RFC 8489 section 10.2.3: once the client holds a long-term key,
+        // every response must carry a valid MESSAGE-INTEGRITY, except the
+        // error responses a server sends before it authenticates the
+        // request (400, 401, 438). An unauthenticated or forged response is
+        // discarded before the transaction is consumed, so it cannot cancel
+        // or complete it.
+        if let Some(key) = &self.key {
+            let unauthenticated_error =
+                cls == Class::Error && matches!(msg.error_code(), Some(400 | 401 | 438));
+            if !unauthenticated_error && !Message::verify(buf, key) {
+                log::warn!("TURN {}: response failed integrity check", self.server);
+                return (ev, out);
+            }
+        }
         let Some(mut txn) = self.txns.remove(&msg.tid) else {
             return (ev, out);
         };
-        match class(msg.typ) {
+        match cls {
             Class::Success => {
-                if let Some(key) = &self.key {
-                    if msg.get(ATTR_MESSAGE_INTEGRITY).is_some() && !Message::verify(buf, key) {
-                        log::warn!("TURN {}: response failed integrity check", self.server);
-                        return (ev, out);
-                    }
-                }
                 self.on_success(now, txn.kind, &msg, &mut ev, &mut out);
             }
             Class::Error => {
@@ -471,5 +486,107 @@ impl TurnClient {
         self.txns.clear();
         let msg = Message::new(REFRESH_REQUEST).attr(ATTR_LIFETIME, 0u32.to_be_bytes().to_vec());
         vec![self.encode(&msg)]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SERVER: &str = "203.0.113.1:3478";
+
+    fn allocate_success(tid: TransId, key: Option<&[u8]>) -> Vec<u8> {
+        let relay: SocketAddr = "198.51.100.7:40000".parse().unwrap();
+        let m = Message {
+            typ: ALLOCATE_REQUEST | 0x0100,
+            tid,
+            attrs: Vec::new(),
+        }
+        .attr(ATTR_XOR_RELAYED_ADDRESS, encode_xor_addr(relay, &tid))
+        .attr(ATTR_LIFETIME, 600u32.to_be_bytes().to_vec());
+        m.encode(key, true)
+    }
+
+    /// RFC 8489 section 10.2.3: after the 401 that supplies realm and nonce,
+    /// a response without a valid MESSAGE-INTEGRITY is discarded and the
+    /// transaction stays pending.
+    #[test]
+    fn authenticated_responses_need_integrity() {
+        let now = Instant::now();
+        let mut c = TurnClient::new(
+            SERVER.parse().unwrap(),
+            0,
+            "user".into(),
+            "pass".into(),
+            false,
+        );
+        let _ = c.start(now);
+        let tid0 = *c.txns.keys().next().unwrap();
+
+        // The 401 is unauthenticated by design and triggers the retry.
+        let challenge = Message {
+            typ: ALLOCATE_REQUEST | 0x0110,
+            tid: tid0,
+            attrs: Vec::new(),
+        }
+        .attr(ATTR_ERROR_CODE, vec![0, 0, 4, 1])
+        .attr(ATTR_REALM, "realm")
+        .attr(ATTR_NONCE, "nonce")
+        .encode(None, true);
+        let (ev, out) = c.handle(now, &challenge);
+        assert!(ev.is_empty());
+        assert_eq!(out.len(), 1, "retried with credentials");
+        let key = long_term_key("user", "realm", "pass");
+        assert_eq!(c.key, Some(key));
+        let tid1 = *c.txns.keys().next().unwrap();
+        assert_ne!(tid0, tid1);
+
+        // Success without MESSAGE-INTEGRITY: dropped, transaction kept.
+        let (ev, _) = c.handle(now, &allocate_success(tid1, None));
+        assert!(ev.is_empty());
+        assert!(c.txns.contains_key(&tid1));
+        assert!(c.relay.is_none());
+
+        // Wrong key: dropped too.
+        let wrong = long_term_key("user", "realm", "nope");
+        let (ev, _) = c.handle(now, &allocate_success(tid1, Some(&wrong)));
+        assert!(ev.is_empty());
+        assert!(c.txns.contains_key(&tid1));
+
+        // A forged error (not 400/401/438) without integrity is dropped as well.
+        let forged = Message {
+            typ: ALLOCATE_REQUEST | 0x0110,
+            tid: tid1,
+            attrs: Vec::new(),
+        }
+        .attr(ATTR_ERROR_CODE, vec![0, 0, 4, 37]) // 437 Allocation Mismatch
+        .encode(None, true);
+        let (ev, _) = c.handle(now, &forged);
+        assert!(ev.is_empty());
+        assert!(c.txns.contains_key(&tid1));
+
+        // Correct integrity: allocated.
+        let (ev, _) = c.handle(now, &allocate_success(tid1, Some(&key)));
+        assert!(matches!(ev.as_slice(), [TurnEvent::Allocated { .. }]));
+        assert!(c.txns.is_empty());
+        assert!(c.relay.is_some());
+    }
+
+    /// Before any challenge there is no key, so an anonymous allocation
+    /// (a server without authentication) still works.
+    #[test]
+    fn anonymous_allocation_is_accepted() {
+        let now = Instant::now();
+        let mut c = TurnClient::new(
+            SERVER.parse().unwrap(),
+            0,
+            String::new(),
+            String::new(),
+            false,
+        );
+        let _ = c.start(now);
+        let tid = *c.txns.keys().next().unwrap();
+        let (ev, _) = c.handle(now, &allocate_success(tid, None));
+        assert!(matches!(ev.as_slice(), [TurnEvent::Allocated { .. }]));
     }
 }

@@ -49,6 +49,11 @@ default-features = false
 [dependencies.fastrand]
 version = "2.0.1"
 
+# Patched (tauri-plugin-webrtc): operating system randomness for ICE
+# credentials and STUN transaction ids (CryptographicRng).
+[dependencies.getrandom]
+version = "0.3"
+
 [dependencies.openssl]
 version = "0.10.78"
 optional = true

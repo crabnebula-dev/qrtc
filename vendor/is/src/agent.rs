@@ -12,8 +12,8 @@ use crate::Sha1HmacProvider;
 use crate::preference::default_local_preference;
 use crate::stun::{Class as StunClass, Method as StunMethod, StunTiming};
 use crate::stun::{StunMessage, StunPacket, TransId};
+use str0m_proto::{CryptographicRng, Pii, Protocol};
 use str0m_proto::{DATAGRAM_MTU_TARGET, DATAGRAM_MTU_WARN, Id, Transmit};
-use str0m_proto::{NonCryptographicRng, Pii, Protocol};
 
 use crate::candidate::{Candidate, CandidateKind};
 use crate::pair::{CandidatePair, CheckState, PairId};
@@ -331,7 +331,9 @@ impl IceAgent {
             local_credentials,
             remote_credentials: None,
             controlling: false,
-            control_tie_breaker: NonCryptographicRng::u64(),
+            // Patched (tauri-plugin-webrtc): from the OS, so no generator
+            // state leaves this host in cleartext STUN attributes.
+            control_tie_breaker: CryptographicRng::u64(),
             state: IceConnectionState::New,
             local_candidates: vec![],
             remote_candidates: vec![],

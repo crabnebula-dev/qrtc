@@ -16,7 +16,7 @@ mod bandwidth;
 pub use bandwidth::{Bitrate, DataSize};
 
 mod rng;
-pub use rng::NonCryptographicRng;
+pub use rng::{CryptographicRng, NonCryptographicRng};
 
 mod pii;
 pub use pii::Pii;

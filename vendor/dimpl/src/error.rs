@@ -444,6 +444,10 @@ pub enum SecurityError {
     ClientHelloLegacyVersionNotDtls12,
     /// A DTLS 1.3 ServerHello did not use the required DTLS 1.2 legacy version.
     ServerHelloLegacyVersionNotDtls12,
+    /// Patched (tauri-plugin-webrtc): a DTLS 1.2 ServerHello carried the
+    /// RFC 8446 section 4.1.3 downgrade sentinel although DTLS 1.3 was
+    /// offered, so the ClientHello was tampered with on the way.
+    DowngradeSentinel,
     /// A DTLS 1.3 ClientHello did not contain a recognized DTLS 1.3 version.
     ClientHelloMissingDtls13SupportedVersions,
     /// A ClientHello did not offer null compression.
@@ -1130,6 +1134,12 @@ impl fmt::Display for SecurityError {
             }
             Self::ServerHelloLegacyVersionNotDtls12 => {
                 write!(f, "ServerHello legacy_version must be DTLS 1.2")
+            }
+            Self::DowngradeSentinel => {
+                write!(
+                    f,
+                    "ServerHello random carries the DTLS 1.3 downgrade sentinel"
+                )
             }
             Self::ClientHelloMissingDtls13SupportedVersions => {
                 write!(f, "ClientHello missing DTLS 1.3 supported_versions")

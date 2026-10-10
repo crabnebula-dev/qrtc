@@ -21,7 +21,7 @@ as the W3C `RTCPeerConnection` API. Two consumers are planned or shipping:
 | Area | Status |
 | --- | --- |
 | JSEP | Offers, answers, renegotiation, rollback, ICE restart, `setCodecPreferences` |
-| ICE | Host and mDNS `.local` candidates, STUN, TURN over UDP, TCP and TLS, relay-only policy |
+| ICE | Host candidates as mDNS `.local` names (answered and resolved, as browsers do), STUN, TURN over UDP, TCP and TLS, relay-only policy |
 | DTLS | DTLS 1.2, or DTLS 1.3 with X25519MLKEM768 (see below) |
 | Data channels | Reliable and unreliable, ordered and unordered, negotiated ids, buffered-amount events |
 | Audio | Opus (rusty-opus), AEC3, noise suppression and AGC (sonora), jitter buffer, in-band FEC, DTMF (RFC 4733) |
@@ -97,8 +97,8 @@ repository, so consumers need no `[patch]` section.
 | --- | --- | --- |
 | `str0m` | 0.24.0 | VP8 PictureID for SFUs, JSEP re-offers; see `vendor/str0m/PATCHES.md` |
 | `str0m-rust-crypto` | 0.6.0 | DTLS certificate from RustCrypto (no AWS-LC); DTLS options for post-quantum groups |
-| `dimpl` | 0.7.4 | Key encapsulation groups for DTLS 1.3; see `vendor/dimpl/PATCHES.md` |
-| `str0m-proto`, `is` | 0.7.0, 0.11.1 | Unmodified, vendored so they use the patched dimpl |
+| `dimpl` | 0.7.4 | Key encapsulation groups for DTLS 1.3, RFC 8446 downgrade sentinel; see `vendor/dimpl/PATCHES.md` |
+| `str0m-proto`, `is` | 0.7.0, 0.11.1 | ICE credentials and STUN transaction ids from the OS random number generator; vendored so they use the patched dimpl |
 
 The patches are meant for upstream.
 
@@ -145,3 +145,5 @@ own licences (all MIT OR Apache-2.0).
 
 CrabNebula stewards qrtc as free and open-source software. See
 [COMPLIANCE.md](COMPLIANCE.md) for its status under the Cyber Resilience Act.
+Report vulnerabilities as described in [SECURITY.md](SECURITY.md). Security
+reviews and their findings are recorded under [audits/](audits/).

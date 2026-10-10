@@ -88,10 +88,10 @@ impl fmt::Debug for TransId {
 impl TransId {
     /// A new random transaction id.
     pub fn new() -> Self {
+        // Patched (tauri-plugin-webrtc): RFC 8489 section 6 asks for a
+        // cryptographically random transaction id.
         let mut t = [0_u8; 12];
-        for v in &mut t {
-            *v = NonCryptographicRng::u8();
-        }
+        str0m_proto::CryptographicRng::fill(&mut t);
         TransId(t)
     }
 
@@ -675,7 +675,6 @@ impl<'a> Attributes<'a> {
 
 use std::{io, str};
 
-use str0m_proto::NonCryptographicRng;
 
 const PAD: [u8; 4] = [0, 0, 0, 0];
 impl<'a> Attributes<'a> {

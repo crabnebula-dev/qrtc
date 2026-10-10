@@ -59,6 +59,27 @@ impl Random {
         Self { bytes }
     }
 
+    // Patched (tauri-plugin-webrtc): RFC 8446 section 4.1.3 downgrade
+    // protection. A server that supports (D)TLS 1.3 but negotiates 1.2 sets
+    // the last eight bytes of its random to this value; a client that offered
+    // 1.3 and sees it knows its ClientHello was tampered with.
+
+    /// Sentinel for a (D)TLS 1.3-capable server negotiating 1.2.
+    pub const DOWNGRADE_SENTINEL_12: [u8; 8] = *b"DOWNGRD\x01";
+    /// Sentinel for a (D)TLS 1.3-capable server negotiating 1.1 or lower.
+    pub const DOWNGRADE_SENTINEL_11: [u8; 8] = *b"DOWNGRD\x00";
+
+    /// Whether the random ends with either downgrade sentinel.
+    pub fn has_downgrade_sentinel(&self) -> bool {
+        let tail = &self.bytes[24..];
+        tail == Self::DOWNGRADE_SENTINEL_12 || tail == Self::DOWNGRADE_SENTINEL_11
+    }
+
+    /// Mark this random as coming from a 1.3-capable server negotiating 1.2.
+    pub fn set_downgrade_sentinel_12(&mut self) {
+        self.bytes[24..].copy_from_slice(&Self::DOWNGRADE_SENTINEL_12);
+    }
+
     /// Parse a 32-byte `Random` from wire format.
     pub fn parse(input: &[u8]) -> IResult<&[u8], Random> {
         let (input, data) = take(32_usize)(input)?;
@@ -1300,5 +1321,24 @@ mod tests {
         parsed.serialize(&mut serialized);
 
         assert_eq!(&*serialized, &data[..]);
+    }
+}
+
+// Patched (tauri-plugin-webrtc): downgrade sentinel.
+#[cfg(test)]
+mod downgrade_sentinel_tests {
+    use super::*;
+
+    #[test]
+    fn sentinel_is_detected_and_set() {
+        let mut r = Random { bytes: [0x42; 32] };
+        assert!(!r.has_downgrade_sentinel());
+        r.set_downgrade_sentinel_12();
+        assert!(r.has_downgrade_sentinel());
+        assert_eq!(&r.bytes[..24], &[0x42; 24]);
+        assert_eq!(&r.bytes[24..], b"DOWNGRD\x01");
+        let mut r = Random { bytes: [0x42; 32] };
+        r.bytes[24..].copy_from_slice(&Random::DOWNGRADE_SENTINEL_11);
+        assert!(r.has_downgrade_sentinel());
     }
 }

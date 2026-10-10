@@ -34,6 +34,11 @@ tracing = { version = "0.1", features = ["log"] }
 rusty-opus = "0.9"
 sonora = "0.2"
 socket2 = { version = "0.6", features = ["all"] }
+# Operating system randomness: post-quantum key shares, and reseeding the
+# non-cryptographic generator str0m uses for RTP identifiers (see
+# native::reseed_fastrand). fastrand is already in the tree through str0m.
+getrandom = "0.3"
+fastrand = "2"
 # TURN over TLS (turns:). The crypto provider is chosen by feature.
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "logging"], optional = true }
 tokio-rustls = { version = "0.26", default-features = false, optional = true }
@@ -45,7 +50,6 @@ dimpl = { path = "vendor/dimpl", version = "0.7.4", default-features = false, fe
 str0m-rust-crypto = { path = "vendor/str0m-rust-crypto", version = "0.6", optional = true }
 ml-kem = { version = "0.3.2", features = ["getrandom", "zeroize"], optional = true }
 x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
-getrandom = { version = "0.3", optional = true }
 zeroize = { version = "1", optional = true }
 # ML-KEM-512 and ML-KEM-768 (FIPS 203) from moduletto, MIT OR Apache-2.0.
 moduletto = { git = "https://github.com/crabnebula-dev/moduletto", branch = "main", version = "0.1", optional = true }
@@ -68,7 +72,7 @@ pq-hybrid = ["_pq", "dep:ml-kem"]
 # hybrid on a private codepoint, which only this engine speaks. Takes
 # precedence over ml-kem when both features are on.
 pq-moduletto = ["_pq", "dep:moduletto"]
-_pq = ["dep:dimpl", "dep:str0m-rust-crypto", "dep:x25519-dalek", "dep:getrandom", "dep:zeroize"]
+_pq = ["dep:dimpl", "dep:str0m-rust-crypto", "dep:x25519-dalek", "dep:zeroize"]
 
 [dev-dependencies]
 env_logger = "0.11"

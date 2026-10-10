@@ -1,0 +1,21 @@
+qrtc: quantum realtime communication
+Copyright (c) 2026 Daniel Thompson-Yvetot
+
+Stewarded by CrabNebula Ltd as free and open-source software. Licensed under
+either the Apache License, Version 2.0 (LICENSE-APACHE) or the MIT license
+(LICENSE-MIT), at your option.
+
+This product includes software developed by third parties. The copies under
+vendor/ carry small patches, listed in each crate's PATCHES.md and proposed
+upstream; the crates keep their own licences and copyright.
+
+  str0m 0.24.0, str0m-proto 0.7.0, is 0.11.1, str0m-rust-crypto 0.6.0
+  dimpl 0.7.4
+    Copyright 2022 Martin Algesten and contributors
+    MIT OR Apache-2.0 (vendor/<crate>/LICENSE-*)
+
+  vendor/str0m/src/packet
+    Parts of the RTP packetizers are licensed under the Apache License,
+    Version 2.0 only; see vendor/str0m/src/packet/LICENSE-APACHE.txt.
+
+Other dependencies are listed with their licences in sbom/qrtc.cdx.json.

@@ -27,7 +27,24 @@ use tokio::sync::{mpsc, oneshot};
 pub struct NativeEngine {
     rt: tokio::runtime::Runtime,
     audio: Arc<audio::AudioHub>,
+    /// Answers mDNS queries for the `.local` names of host candidates.
+    mdns: Arc<mdns::Responder>,
     next_uid: std::sync::atomic::AtomicU64,
+}
+
+/// Reseed this thread's `fastrand` generator from the operating system.
+///
+/// str0m draws RTP identifiers (SSRC, sequence numbers, VP8 PictureID) from
+/// fastrand's thread-local generator, which on native targets seeds itself
+/// from the clock and the thread id. Values that must be unguessable (ICE
+/// credentials, STUN transaction ids, the ICE tie-breaker) do not use it:
+/// the vendored `is` and `str0m-proto` read the OS directly, see
+/// `vendor/str0m/PATCHES.md`. Reseeding is defence in depth for the rest.
+fn reseed_fastrand() {
+    let mut seed = [0u8; 8];
+    if getrandom::fill(&mut seed).is_ok() {
+        fastrand::seed(u64::from_ne_bytes(seed));
+    }
 }
 
 impl NativeEngine {
@@ -38,14 +55,18 @@ impl NativeEngine {
             // str0m's SCTP path uses deep, large frames in debug builds; the
             // 2 MiB tokio default overflowed under data channel load.
             .thread_stack_size(8 * 1024 * 1024)
+            .on_thread_start(reseed_fastrand)
             .enable_all()
             .build()
             .map_err(|e| Error::NotSupported(format!("engine runtime: {e}")))?;
         let audio = audio::AudioHub::new();
         audio.start_clock(&rt);
+        let mdns = mdns::Responder::new();
+        mdns.start(&rt);
         Ok(Self {
             rt,
             audio,
+            mdns,
             next_uid: std::sync::atomic::AtomicU64::new(1),
         })
     }
@@ -61,6 +82,8 @@ impl PeerEngine for NativeEngine {
         let (tx, rx) = mpsc::unbounded_channel();
         let driver = {
             let _guard = self.rt.enter();
+            // `Driver::new` builds the `Rtc` on the caller's thread.
+            reseed_fastrand();
             let uid = self
                 .next_uid
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -69,6 +92,7 @@ impl PeerEngine for NativeEngine {
                 events,
                 shared.clone(),
                 self.audio.clone(),
+                self.mdns.clone(),
                 uid,
             )?
         };
