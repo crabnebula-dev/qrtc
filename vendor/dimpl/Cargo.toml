@@ -112,7 +112,7 @@ version = "0.9"
 optional = true
 
 [dependencies.chacha20poly1305]
-version = "0.10"
+version = "0.11"
 optional = true
 
 [dependencies.der]
