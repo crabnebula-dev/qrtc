@@ -550,7 +550,7 @@ dependencies = [
  "rand_core 0.6.4",
  "sec1",
  "sha2",
- "signature",
+ "signature 3.0.0",
  "spki 0.7.3",
  "subtle",
  "time",
@@ -568,7 +568,7 @@ dependencies = [
  "digest 0.10.7",
  "elliptic-curve",
  "rfc6979",
- "signature",
+ "signature 2.2.0",
  "spki 0.7.3",
 ]
 
@@ -579,7 +579,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
  "pkcs8 0.10.2",
- "signature",
+ "signature 2.2.0",
 ]
 
 [[package]]
@@ -1390,7 +1390,7 @@ dependencies = [
  "pkcs8 0.10.2",
  "rand_core 0.6.4",
  "sha2",
- "signature",
+ "signature 2.2.0",
  "spki 0.7.3",
  "subtle",
  "zeroize",
@@ -1473,7 +1473,7 @@ dependencies = [
  "rustls-webpki 0.102.8",
  "sec1",
  "sha2",
- "signature",
+ "signature 2.2.0",
  "x25519-dalek",
 ]
 
@@ -1662,6 +1662,12 @@ dependencies = [
  "digest 0.10.7",
  "rand_core 0.6.4",
 ]
+
+[[package]]
+name = "signature"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
 
 [[package]]
 name = "slab"
@@ -2195,7 +2201,7 @@ dependencies = [
  "const-oid 0.9.6",
  "der 0.7.10",
  "sha1",
- "signature",
+ "signature 2.2.0",
  "spki 0.7.3",
  "tls_codec",
 ]
