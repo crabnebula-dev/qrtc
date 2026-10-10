@@ -49,7 +49,7 @@ rustls-rustcrypto = { version = "0.0.2-alpha", optional = true }
 dimpl = { path = "vendor/dimpl", version = "0.7.4", default-features = false, features = ["rust-crypto"], optional = true }
 str0m-rust-crypto = { path = "vendor/str0m-rust-crypto", version = "0.6", optional = true }
 ml-kem = { version = "0.3.2", features = ["getrandom", "zeroize"], optional = true }
-x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
+x25519-dalek = { version = "3", features = ["static_secrets"], optional = true }
 zeroize = { version = "1", optional = true }
 # ML-KEM-512 and ML-KEM-768 (FIPS 203) from moduletto, MIT OR Apache-2.0.
 moduletto = { git = "https://github.com/crabnebula-dev/moduletto", branch = "main", version = "0.1", optional = true }
